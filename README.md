@@ -10,6 +10,7 @@ It is an experimental lab and reference workflow for preparing colour-rich 3D mo
 Main application overview showing the Color Mix Lab interface.
 -->
 <img src="docs/screenshots/color-mix-lab-overview.png" alt="Color Mix Lab overview" width="900">
+
 ---
 
 ## What is Color Mix Lab?
@@ -100,6 +101,7 @@ A typical full workflow starts with a textured model and ends with a PrusaSlicer
    Open the exported 3MF in PrusaSlicer and check all printer, filament, extruder, wipe, and preview settings before printing.
 
 <img src="docs/screenshots/vertex-color-workflow_02.png" alt="Vertex Color 2 ColorMix workflow" width="900">
+
 ---
 
 ## Supported inputs
@@ -221,7 +223,6 @@ Color Mix Lab uses filament colours only as input for colour selection, proposal
 
 <img src="docs/screenshots/vertex-color-workflow_03.png" alt="Vertex Color 2 ColorMix workflow" width="900">
 
-
 ---
 
 ## PrusaSlicer / 3MF export
@@ -264,6 +265,8 @@ Compatibility with other slicers is not a goal.
 
 <img src="docs/screenshots/prusaslicer_editor.png" alt="Prusa Slicer Editor" width="900">
 <img src="docs/screenshots/prusaslicer_preview.png" alt="Prusa Slicer Preview" width="900">
+
+---
 
 ## Limitations
 
