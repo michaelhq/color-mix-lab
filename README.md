@@ -9,7 +9,7 @@ It is an experimental lab and reference workflow for preparing colour-rich 3D mo
 <!-- Screenshot suggestion:
 Main application overview showing the Color Mix Lab interface.
 -->
-
+<img src="docs/screenshots/color-mix-lab-overview.png" alt="Color Mix Lab overview" width="900">
 ---
 
 ## What is Color Mix Lab?
@@ -54,9 +54,8 @@ This workflow is useful when a model looks coloured in a 3D viewer, but the colo
 
 For supported file types, see [Supported inputs](#supported-inputs).
 
-<!-- Screenshot suggestion:
-Texture Baking workflow with a textured model loaded, original preview visible, and baking controls shown.
--->
+<img src="docs/screenshots/texture-baking-workflow.png" alt="Texture Baking workflow" width="900">
+
 
 ### VertexColor 2 ColorMix
 
@@ -68,9 +67,7 @@ This workflow can be used independently of Texture Baking. For example, a model 
 
 For supported file types, see [Supported inputs](#supported-inputs).
 
-<!-- Screenshot suggestion:
-VertexColor 2 ColorMix workflow showing the loaded model, reduced target palette, physical colours, virtual blends, and print simulation.
--->
+<img src="docs/screenshots/vertex-color-workflow_01.png" alt="Vertex Color 2 ColorMix workflow" width="900">
 
 ---
 
@@ -102,10 +99,7 @@ A typical full workflow starts with a textured model and ends with a PrusaSlicer
 8. **Inspect in PrusaSlicer**  
    Open the exported 3MF in PrusaSlicer and check all printer, filament, extruder, wipe, and preview settings before printing.
 
-<!-- Screenshot suggestion:
-Exported 3MF opened in PrusaSlicer with physical and virtual extruders visible.
--->
-
+<img src="docs/screenshots/vertex-color-workflow_02.png" alt="Vertex Color 2 ColorMix workflow" width="900">
 ---
 
 ## Supported inputs
@@ -182,6 +176,8 @@ The effective virtual blends are therefore different from the reduced target pal
 - The **reduced target palette** describes the desired model colours.
 - The **effective virtual blends** describe the colours that are reachable with the selected physical filaments and virtual mixing constraints.
 
+<img src="docs/screenshots/vertex-color-workflow_04.png" alt="Vertex Color 2 ColorMix workflow" width="900">
+
 ### Print simulation
 
 The **print simulation** previews how the model may look after mapping the reduced target palette to the available physical colours and effective virtual blends.
@@ -223,9 +219,8 @@ Possible external sources include:
 
 Color Mix Lab uses filament colours only as input for colour selection, proposal, and mixing calculations. The slicer’s actual filament profiles remain part of PrusaSlicer and, where applicable, the selected 3MF template.
 
-<!-- Screenshot suggestion:
-Filament CSV import with a visible filament list, colour swatches, material/name fields, and physical colour assignment.
--->
+<img src="docs/screenshots/vertex-color-workflow_03.png" alt="Vertex Color 2 ColorMix workflow" width="900">
+
 
 ---
 
@@ -267,10 +262,8 @@ Recommended checks:
 
 Compatibility with other slicers is not a goal.
 
-<!-- Screenshot suggestion:
-PrusaSlicer with an exported Color Mix Lab 3MF loaded, showing physical and virtual extruder colours.
--->
-
+<img src="docs/screenshots/prusaslicer_editor.png" alt="Prusa Slicer Editor" width="900">
+<img src="docs/screenshots/prusaslicer_preview.png" alt="Prusa Slicer Preview" width="900">
 ---
 
 ## Limitations
