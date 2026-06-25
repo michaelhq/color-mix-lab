@@ -264,7 +264,6 @@ Compatibility with other slicers is not a goal.
 
 <img src="docs/screenshots/prusaslicer_editor.png" alt="Prusa Slicer Editor" width="900">
 <img src="docs/screenshots/prusaslicer_preview.png" alt="Prusa Slicer Preview" width="900">
----
 
 ## Limitations
 
