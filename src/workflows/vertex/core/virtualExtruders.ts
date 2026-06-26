@@ -41,7 +41,9 @@ export interface VirtualBlendEntry {
 }
 
 export interface PhysicalOnlyEntry {
+  // First palette index in the merged physical assignment, used as stable UI key.
   paletteIndex: number;
+  targetPaletteIndices: number[];
   targetRgb: RGB;
   physicalRgb: RGB;
   physicalExtruder: number;
@@ -73,9 +75,12 @@ export interface VirtualExtruderPlanOptions {
   previewLightnessOffset: number;
 }
 
-// Virtual mixtures are generated as discrete layer sequences. These constants
-// keep the display ratios close to the printable sequence while avoiding very
-// long generated patterns.
+// Virtual mixtures are generated as discrete layer sequences. The UI exposes
+// coarse mixing steps; internally all supported steps are represented on a
+// 2.5%-unit grid so exported layer-sequence semantics remain stable for
+// visible UI values such as 2.5%, 5%, 10%, 20%, and 25%.
+const BLEND_PERCENT_UNIT = 2.5;
+const BLEND_TOTAL_UNITS = Math.round(100 / BLEND_PERCENT_UNIT);
 const BLEND_WEIGHT_RESOLUTION = 64;
 const BLEND_QUANTISE_MAX_ERROR = 0.03;
 
@@ -244,17 +249,41 @@ interface BlendCandidate {
   layerAverageRgb: RGB;
 }
 
-function buildUnitCountCompositions(parts: number, totalUnits: number): number[][] {
+function stepPercentToUnits(ratioStepPercent: number): number {
+  const safeStep = Number.isFinite(ratioStepPercent) ? ratioStepPercent : 5;
+  return Math.max(1, Math.round(safeStep / BLEND_PERCENT_UNIT));
+}
+
+function buildUnitCountCompositions(
+  parts: number,
+  totalUnits: number,
+  stepUnits: number,
+): number[][] {
   if (parts <= 1) return [[totalUnits]];
+
+  const minUnits = Math.max(1, stepUnits);
+  const allowedOffGridComponents = totalUnits % stepUnits === 0 ? 0 : 1;
   const out: number[][] = [];
-  const rec = (remainingParts: number, remainingUnits: number, current: number[]) => {
+
+  const rec = (
+    remainingParts: number,
+    remainingUnits: number,
+    current: number[],
+  ) => {
     if (remainingParts === 1) {
-      if (remainingUnits > 0) out.push([...current, remainingUnits]);
+      if (remainingUnits < minUnits) return;
+      const counts = [...current, remainingUnits];
+      const offGrid = counts.filter((count) => count % stepUnits !== 0).length;
+      if (offGrid <= allowedOffGridComponents) out.push(counts);
       return;
     }
-    const max = remainingUnits - (remainingParts - 1);
-    for (let count = 1; count <= max; count++) rec(remainingParts - 1, remainingUnits - count, [...current, count]);
+
+    const max = remainingUnits - minUnits * (remainingParts - 1);
+    for (let count = minUnits; count <= max; count++) {
+      rec(remainingParts - 1, remainingUnits - count, [...current, count]);
+    }
   };
+
   rec(parts, totalUnits, []);
   return out;
 }
@@ -266,12 +295,13 @@ function makeBlendCandidates(
 ): BlendCandidate[] {
   const candidates = slots.filter((slot) => slot.slot >= 1 && slot.slot <= 8);
   if (candidates.length === 0) return [];
-  const totalUnits = Math.max(1, Math.round(100 / Math.max(0.1, ratioStepPercent || 5)));
+  const totalUnits = BLEND_TOTAL_UNITS;
+  const stepUnits = stepPercentToUnits(ratioStepPercent);
   const out: BlendCandidate[] = [];
   const maxSize = Math.min(maxComponents, candidates.length) as 1 | 2 | 3;
 
   for (let size = 1; size <= maxSize; size++) {
-    const countSets = buildUnitCountCompositions(size, totalUnits);
+    const countSets = buildUnitCountCompositions(size, totalUnits, stepUnits);
     for (const subset of combinations(candidates, size)) {
       for (const unitCounts of countSets) {
         const ratios = unitCounts.map((count) => count / totalUnits);
@@ -559,7 +589,19 @@ export function buildVirtualExtruderPlan(
     | { kind: "physical"; extruder: number }
     | { kind: "virtual"; virtualId: number }
   >();
-  const physicalOnly: PhysicalOnlyEntry[] = [];
+  const physicalOnlyByExtruder = new Map<number, PhysicalOnlyEntry>();
+  const appendPhysicalOnly = (entry: PhysicalOnlyEntry) => {
+    const existing = physicalOnlyByExtruder.get(entry.physicalExtruder);
+    if (!existing) {
+      physicalOnlyByExtruder.set(entry.physicalExtruder, entry);
+      return;
+    }
+    existing.targetPaletteIndices.push(...entry.targetPaletteIndices);
+    existing.targetPaletteIndices.sort((a, b) => a - b);
+    existing.paletteIndex = existing.targetPaletteIndices[0] ?? existing.paletteIndex;
+    existing.triangleCount += entry.triangleCount;
+    existing.linearRgbError = Math.max(existing.linearRgbError, entry.linearRgbError);
+  };
   const bySequence = new Map<
     string,
     VirtualBlendEntry & { weightedTargets: Array<{ rgb: RGB; weight: number }> }
@@ -590,8 +632,9 @@ export function buildVirtualExtruderPlan(
     if (active.length === 1 || dominant.ratio >= opts.purePhysicalThreshold) {
       const physicalRgb = dominant.slot.filament.effectiveRgb;
       const previewPhysicalRgb = adjustPreviewLightness(physicalRgb, opts.previewLightnessOffset);
-      physicalOnly.push({
+      appendPhysicalOnly({
         paletteIndex: p.index,
+        targetPaletteIndices: [p.index],
         targetRgb: p.rgb,
         physicalRgb: previewPhysicalRgb,
         physicalExtruder: dominant.slot.slot,
@@ -611,8 +654,9 @@ export function buildVirtualExtruderPlan(
         physicalSlots.find((slot) => slot.slot === ext)?.filament
           .effectiveRgb ?? dominant.slot.filament.effectiveRgb;
       const previewPhysicalRgb = adjustPreviewLightness(physicalRgb, opts.previewLightnessOffset);
-      physicalOnly.push({
+      appendPhysicalOnly({
         paletteIndex: p.index,
+        targetPaletteIndices: [p.index],
         targetRgb: p.rgb,
         physicalRgb: previewPhysicalRgb,
         physicalExtruder: ext,
@@ -627,15 +671,7 @@ export function buildVirtualExtruderPlan(
     const layerAverageRgb = best.layerAverageRgb;
     const effectiveError = best.error;
     const key = best.sequenceKey;
-    const existing = [...bySequence.values()].find(
-      (entry) =>
-        entry.sequenceKey === key &&
-        compatibleForDisplayMerge(
-          entry.displayRgb,
-          p.rgb,
-          effectiveMergeProtection(opts.accentProtection, opts.mixPriority),
-        ),
-    );
+    const existing = bySequence.get(key);
     if (existing) {
       existing.targetPaletteIndices.push(p.index);
       existing.triangleCount += p.count;
@@ -644,8 +680,10 @@ export function buildVirtualExtruderPlan(
         effectiveError,
       );
       existing.weightedTargets.push({ rgb: p.rgb, weight: p.count });
-      // Same layer sequence means same Prusa FDM prediction. Keep the printable
-      // mixture colour instead of averaging target colours back into the preview.
+      // Identical quantised layer sequences are one printable virtual mixture.
+      // Coarse mixing steps such as 10%, 20%, or 25% intentionally collapse many
+      // palette colours onto the same VE instead of keeping duplicate virtual
+      // extruders for visually different target colours.
       existing.displayRgb = effectiveRgb;
       paletteToAssignment.set(p.index, {
         kind: "virtual",
@@ -686,7 +724,7 @@ export function buildVirtualExtruderPlan(
       linearRgbError: effectiveError,
       weightedTargets: [{ rgb: p.rgb, weight: p.count }],
     };
-    bySequence.set(bySequence.has(key) ? `${key}|${p.index}` : key, entry);
+    bySequence.set(key, entry);
     paletteToAssignment.set(p.index, { kind: "virtual", virtualId });
   }
 
@@ -694,7 +732,9 @@ export function buildVirtualExtruderPlan(
     ({ weightedTargets: _weightedTargets, ...entry }) => entry,
   );
   virtualBlends.sort((a, b) => a.virtualId - b.virtualId);
-  physicalOnly.sort((a, b) => a.paletteIndex - b.paletteIndex);
+  const physicalOnly = [...physicalOnlyByExtruder.values()].sort(
+    (a, b) => a.paletteIndex - b.paletteIndex,
+  );
   return { virtualBlends, physicalOnly, paletteToAssignment };
 }
 
@@ -731,7 +771,7 @@ export function virtualExtruderPlanToCsv(plan: VirtualExtruderPlan): string {
         rgbToHex(entry.physicalRgb),
         rgbToHex(entry.physicalRgb),
         entry.triangleCount,
-        entry.paletteIndex,
+        `"${entry.targetPaletteIndices.join(" ")}"`,
         `"E${entry.physicalExtruder}:100%"`,
         `"E${entry.physicalExtruder}"`,
         entry.linearRgbError.toFixed(3),

@@ -292,9 +292,9 @@ const en: Dict = {
   tipResetAdjustments:
     "Resets the pending colour-adjustment sliders to neutral values. Click Apply afterwards to rebuild the preview.",
   tipMaxColours:
-    "Maximum number of virtual target colours after palette reduction. This does not limit the number of physical extruder slots.",
+    "Maximum number of virtual target colours after palette reduction, up to 256. This is the reduced target palette; coarse mixing steps may map several target colours to fewer printable blends. This does not limit the number of physical extruder slots.",
   tipBlendStepPercent:
-    "Quantizes virtual-extruder component ratios to printable percentage steps before layer sequences are built. 5% is the PrusaSlicer-like default and removes colour nuances that are unlikely to print as distinct colours. 2.5% keeps more detail.",
+    "Quantizes virtual-extruder component ratios before layer sequences are built. Smaller steps keep finer colour detail; larger steps create coarser, more stable virtual mixtures. 5% is the PrusaSlicer-like default.",
   tipAccentProtection:
     "Controls how strongly small but visually distinct accent colours are preserved through palette reduction, palette matching, virtual-mix selection and print simulation. Off favours maximum reduction. Balanced is the default. Strong reserves more chromatic accents and merges larger similar areas more readily.",
   tipVirtualMixPriority:

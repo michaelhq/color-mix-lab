@@ -494,6 +494,86 @@ function estimateGeometryMemory(diagnostics: MeshDiagnostics | null): number {
   );
 }
 
+function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
+  return `${formatNumber(count)} ${count === 1 ? singular : pluralForm}`;
+}
+
+function countPositive(values: number[]): number {
+  return values.reduce((sum, value) => sum + (value > 0 ? 1 : 0), 0);
+}
+
+function formatProblemWarningStatus(prefix: string, problemAreas: number, warningMessages: number, successMessage: string): string {
+  if (problemAreas === 0 && warningMessages === 0) return successMessage;
+  const parts: string[] = [];
+  if (problemAreas > 0) parts.push(plural(problemAreas, "problem area"));
+  if (warningMessages > 0) parts.push(plural(warningMessages, "warning"));
+  return `${prefix}: ${parts.join(", ")}.`;
+}
+
+function textureDiagnosticsStatus(diagnostics: MeshDiagnostics | null): string {
+  if (!diagnostics) return "Diagnostics: no model loaded.";
+  const problemAreas = countPositive([
+    diagnostics.openEdges,
+    diagnostics.nonManifoldEdges,
+    diagnostics.degenerateTriangles,
+    diagnostics.trianglesWithoutUV,
+  ]);
+  return formatProblemWarningStatus(
+    "Diagnostics",
+    problemAreas,
+    diagnostics.warnings.length,
+    `Diagnostics: ok (${formatNumber(diagnostics.meshCount)} mesh${diagnostics.meshCount === 1 ? "" : "es"}, ${formatNumber(diagnostics.triangleCount)} triangles).`,
+  );
+}
+
+function textureChecksStatus(report: TextureBakeReport | null): string {
+  if (!report) return "Checks: no baked result yet.";
+  const problemAreas = countPositive([
+    report.bakedOpenEdges,
+    report.bakedNonManifoldEdges,
+    report.missingUvTriangles,
+  ]);
+  return formatProblemWarningStatus(
+    "Checks",
+    problemAreas,
+    report.warnings.length,
+    `Checks: ok (${formatNumber(report.triangleCount)} triangles, ${formatNumber(report.uniqueColors)} colours).`,
+  );
+}
+
+
+type HealthSeverity = "ok" | "warning" | "error" | "neutral";
+
+function formatCombinedTextureStatus(prefix: string, diagnostics: MeshDiagnostics | null, report: TextureBakeReport | null): string {
+  const parts: string[] = [];
+  if (diagnostics) parts.push(textureDiagnosticsStatus(diagnostics));
+  if (report) parts.push(textureChecksStatus(report));
+  return parts.length ? `${prefix} ${parts.join(" ")}` : prefix;
+}
+
+function getDiagnosticsSeverity(diagnostics: MeshDiagnostics | null, hasLoadError: boolean): HealthSeverity {
+  if (hasLoadError) return "error";
+  if (!diagnostics) return "neutral";
+  const issueCount = diagnostics.openEdges + diagnostics.nonManifoldEdges + diagnostics.degenerateTriangles + diagnostics.trianglesWithoutUV;
+  if (issueCount > 0) return "error";
+  return diagnostics.warnings.length > 0 ? "warning" : "ok";
+}
+
+function getChecksSeverity(report: TextureBakeReport | null, hasBakeError: boolean): HealthSeverity {
+  if (hasBakeError) return "error";
+  if (!report) return "neutral";
+  const issueCount = report.bakedOpenEdges + report.bakedNonManifoldEdges + report.missingUvTriangles;
+  if (issueCount > 0) return "error";
+  return report.warnings.length > 0 ? "warning" : "ok";
+}
+
+function healthSeverityLabel(severity: HealthSeverity): string {
+  if (severity === "ok") return "ok";
+  if (severity === "warning") return "warnings";
+  if (severity === "error") return "errors";
+  return "not checked";
+}
+
 function getFileExtension(file: File): string {
   const fileName = file.name.toLowerCase().replace(/\\/g, "/").split("/").at(-1) ?? file.name.toLowerCase();
   const parts = fileName.split(".");
@@ -1001,6 +1081,7 @@ interface TextureBakeAppProps {
   }) => void;
   shellTheme?: ShellTheme;
   reloadDataNonce?: number;
+  onStatusChange?: (message: string) => void;
 }
 
 function fileToDataUrl(file: File): Promise<string> {
@@ -1036,7 +1117,7 @@ function downloadTextFile(name: string, text: string, type = "application/json")
   URL.revokeObjectURL(url);
 }
 
-export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadDataNonce = 0 }: TextureBakeAppProps = {}) {
+export default function App({ onBakedObjHandoff, onStatusChange, shellTheme = "dark", reloadDataNonce = 0 }: TextureBakeAppProps = {}) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const textureProjectInputRef = useRef<HTMLInputElement | null>(null);
   const lastFilesRef = useRef<File[] | null>(null);
@@ -1095,7 +1176,19 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
   const [saveTextureProjectParts, setSaveTextureProjectParts] = useState({ settings: true, sourceFiles: true });
   const [loadTextureProjectParts, setLoadTextureProjectParts] = useState({ settings: true, sourceFiles: true });
 
-  const loadFiles = useCallback(async (filesInput: FileList | File[]) => {
+  const notifyStatus = useCallback((message: string) => {
+    onStatusChange?.(message);
+  }, [onStatusChange]);
+
+  const diagnosticsStatusMessage = useMemo(() => textureDiagnosticsStatus(diagnostics), [diagnostics]);
+  const checksStatusMessage = useMemo(() => textureChecksStatus(bakeReport), [bakeReport]);
+
+  useEffect(() => {
+    if (activeTextureTab === "diagnostics") notifyStatus(diagnosticsStatusMessage);
+    if (activeTextureTab === "checks") notifyStatus(checksStatusMessage);
+  }, [activeTextureTab, checksStatusMessage, diagnosticsStatusMessage, notifyStatus]);
+
+  const loadFiles = useCallback(async (filesInput: FileList | File[]): Promise<MeshDiagnostics | null> => {
     const files = Array.from(filesInput);
     lastFilesRef.current = files;
     const hasZipInput = files.some((file) => getFileExtension(file) === "zip");
@@ -1138,8 +1231,10 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
         sourceSummary: parsed.sourceSummary,
         fileCount: parsed.resolvedFileCount,
       });
+      notifyStatus(formatCombinedTextureStatus("Texture Baking: model loaded.", report, null));
       setProgress({ title: t("progressLoadTitle"), steps, activeIndex: steps.length - 1, done: true });
       window.setTimeout(() => setProgress(null), 650);
+      return report;
     } catch (err) {
       const message = err instanceof Error ? err.message : "File could not be loaded.";
       setScene(null);
@@ -1148,12 +1243,14 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
       setBakeReport(null);
       setFileInfo(null);
       setError(message);
+      notifyStatus("Texture Baking: load failed. Details in Load.");
       setProgress({ title: t("progressLoadTitle"), steps, activeIndex: Math.min(steps.length - 1, 1), error: message });
       window.setTimeout(() => setProgress(null), 1600);
+      return null;
     } finally {
       setBusy(false);
     }
-  }, [t]);
+  }, [notifyStatus, t]);
 
   useEffect(() => {
     if (reloadDataNonce <= 0) return;
@@ -1222,7 +1319,7 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
     const payload: Record<string, unknown> = {
       app: "Color Mix Lab",
       workflow: "Texture Baking",
-      version: "0.7.0",
+      version: "0.7.8",
     };
     if (saveTextureProjectParts.settings) payload.settings = buildTextureSettingsObject();
     if (saveTextureProjectParts.sourceFiles && lastFilesRef.current?.length) {
@@ -1237,6 +1334,7 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
     await waitForPaint(20);
     const name = fileInfo?.name ? `${fileInfo.name.replace(/\.[^.]+$/, "")}_texture_baking_project.json` : "texture_baking_project.json";
     downloadTextFile(name, JSON.stringify(payload, null, 2));
+    notifyStatus("Texture Baking: project saved.");
     setProgress({ title: "Save Texture Baking project", steps, activeIndex: 2, done: true });
     window.setTimeout(() => setProgress(null), 650);
   }
@@ -1245,6 +1343,7 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
     const steps = ["Read project JSON", "Restore source files", "Restore settings"];
     setProgress({ title: "Load Texture Baking project", steps, activeIndex: 0 });
     try {
+      let restoredDiagnostics: MeshDiagnostics | null = null;
       const root = JSON.parse(await file.text()) as Record<string, unknown>;
       await waitForPaint(30);
       if (loadTextureProjectParts.sourceFiles && Array.isArray(root.sourceFiles)) {
@@ -1255,16 +1354,18 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
           if (typeof record.name !== "string" || typeof record.dataUrl !== "string") return [] as File[];
           return [dataUrlToFile(record.dataUrl, record.name, typeof record.type === "string" ? record.type : "application/octet-stream")];
         });
-        if (files.length) await loadFiles(files);
+        if (files.length) restoredDiagnostics = await loadFiles(files);
       }
       if (loadTextureProjectParts.settings && root.settings && typeof root.settings === "object") {
         setProgress({ title: "Load Texture Baking project", steps, activeIndex: 2 });
         applyTextureSettingsObject(root.settings as Record<string, unknown>);
       }
+      notifyStatus(formatCombinedTextureStatus("Texture Baking: project loaded.", restoredDiagnostics ?? diagnostics, bakeReport));
       setProgress({ title: "Load Texture Baking project", steps, activeIndex: steps.length - 1, done: true });
       window.setTimeout(() => setProgress(null), 650);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      notifyStatus("Texture Baking: project load failed. Details in Load.");
       setProgress({ title: "Load Texture Baking project", steps, activeIndex: 0, error: message });
       setError(message);
       window.setTimeout(() => setProgress(null), 1600);
@@ -1316,6 +1417,7 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
       await waitForPaint(30);
       setBakedScene(result.scene);
       setBakeReport(result.report);
+      notifyStatus(formatCombinedTextureStatus("Texture Baking: bake completed.", diagnostics, result.report));
       setProgress({ title: t("progressBakeTitle"), steps, activeIndex: 5 });
       await waitForPaint(30);
       setProgress({ title: t("progressBakeTitle"), steps, activeIndex: steps.length - 1, done: true });
@@ -1325,6 +1427,7 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
       setBakedScene(null);
       setBakeReport(null);
       setBakeError(message);
+      notifyStatus("Texture Baking: bake failed. Details in Bake.");
       setProgress({ title: t("progressBakeTitle"), steps, activeIndex: 2, error: message });
       window.setTimeout(() => setProgress(null), 1600);
     } finally {
@@ -1343,6 +1446,8 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
     bakeColorMode,
     resolvedTextureMaxSize,
     appliedBakeColourCorrection,
+    diagnostics,
+    notifyStatus,
     t,
   ]);
 
@@ -1363,6 +1468,7 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
     setError(null);
     setBakeError(null);
     setCameraSyncState(null);
+    notifyStatus("Texture Baking: model cleared.");
   };
 
   const clearBake = () => {
@@ -1370,6 +1476,7 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
     setBakeReport(null);
     setBakeError(null);
     setCameraSyncState(null);
+    notifyStatus("Texture Baking: baked result cleared.");
   };
 
   const handleCameraSyncChange = useCallback((state: CameraSyncState) => {
@@ -1404,17 +1511,19 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
       const objName = `${baseName}_baked_vertexcolors.obj`;
       const objBlob = new Blob([exported.obj], { type: "text/plain;charset=utf-8" });
       downloadBlob(objBlob, objName);
+      notifyStatus("Texture Baking: baked OBJ exported.");
       setProgress({ title: t("progressExportTitle"), steps, activeIndex: steps.length - 1, done: true });
       window.setTimeout(() => setProgress(null), 650);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setBakeError(`OBJ export failed: ${message}`);
+      notifyStatus("Texture Baking: OBJ export failed. Details in Export.");
       setProgress({ title: t("progressExportTitle"), steps, activeIndex: 2, error: message });
       window.setTimeout(() => setProgress(null), 1600);
     } finally {
       setExportBusy(false);
     }
-  }, [bakedScene, exportBusy, fileInfo?.name, exportScale, language, t]);
+  }, [bakedScene, exportBusy, fileInfo?.name, exportScale, language, notifyStatus, t]);
 
 
   const handoffBakedObj = useCallback(async () => {
@@ -1450,17 +1559,19 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
         vertexCount: exported.vertexCount,
         faceCount: exported.faceCount,
       });
+      notifyStatus(t("handoffPrepared").replace("{faces}", formatNumber(exported.faceCount)).replace("{vertices}", formatNumber(exported.vertexCount)));
       setProgress({ title: t("handoffProgressTitle"), steps, activeIndex: steps.length - 1, done: true });
       window.setTimeout(() => setProgress(null), 650);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setBakeError(t("handoffFailed").replace("{message}", message));
+      notifyStatus("Texture Baking: handoff failed. Details in Export.");
       setProgress({ title: t("handoffProgressTitle"), steps, activeIndex: 2, error: message });
       window.setTimeout(() => setProgress(null), 1600);
     } finally {
       setExportBusy(false);
     }
-  }, [bakedScene, exportBusy, exportScale, fileInfo?.name, language, onBakedObjHandoff, t]);
+  }, [bakedScene, exportBusy, exportScale, fileInfo?.name, language, notifyStatus, onBakedObjHandoff, t]);
 
   const memoryEstimate = estimateGeometryMemory(diagnostics);
   const meshIssueCount = diagnostics
@@ -1473,6 +1584,12 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
     ? bakeReport.bakedOpenEdges + bakeReport.bakedNonManifoldEdges + bakeReport.missingUvTriangles
     : 0;
   const showDiagnosticsOpen = meshIssueCount + bakeIssueCount > 0;
+  const diagnosticsSeverity = getDiagnosticsSeverity(diagnostics, Boolean(error));
+  const checksSeverity = getChecksSeverity(bakeReport, Boolean(bakeError));
+  const tabHealth: Partial<Record<TextureTab, HealthSeverity>> = {
+    diagnostics: diagnosticsSeverity,
+    checks: checksSeverity,
+  };
   const previewDarkMode = previewBackground === "auto" ? darkMode : previewBackground === "dark";
   const hasAnyPreviewModel = Boolean(scene || bakedScene);
 
@@ -1526,17 +1643,27 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
               ["diagnostics", "Diagnostics", "Inspect mesh, topology, UV and material diagnostics."],
               ["checks", "Checks", "Review the baked result and colour distribution before export or handoff."],
               ["settings", "Project data", "Save or load the Texture Baking project data and optionally embed the selected source files."],
-            ] as Array<[TextureTab, string, string]>).map(([tabId, label, tip]) => (
-              <button
-                key={tabId}
-                type="button"
-                className={activeTextureTab === tabId ? "active" : ""}
-                onClick={() => setActiveTextureTab(tabId)}
-                title={tip}
-              >
-                {label}
-              </button>
-            ))}
+            ] as Array<[TextureTab, string, string]>).map(([tabId, label, tip]) => {
+              const health = tabHealth[tabId];
+              return (
+                <button
+                  key={tabId}
+                  type="button"
+                  className={[activeTextureTab === tabId ? "active" : "", health ? "has-health" : ""].filter(Boolean).join(" ")}
+                  onClick={() => setActiveTextureTab(tabId)}
+                  title={tip}
+                >
+                  <span className="sidebar-tab-label">{label}</span>
+                  {health && (
+                    <span
+                      className={`tab-health-dot ${health}`}
+                      title={`${label}: ${healthSeverityLabel(health)}`}
+                      aria-label={`${label}: ${healthSeverityLabel(health)}`}
+                    />
+                  )}
+                </button>
+              );
+            })}
           </nav>
           <div className="tab-content texture-tab-content">
           <div className="card texture-section texture-load-section">
@@ -1611,6 +1738,7 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
                   setBakedScene(null);
                   setBakeReport(null);
                   setBakeError(null);
+                  notifyStatus("Texture Baking: bake colour correction applied. Bake result cleared.");
                 }}
                 disabled={sameTextureColourCorrection(pendingBakeColourCorrection, appliedBakeColourCorrection) || busy || bakeBusy}
                 title={t("applyBakeColourCorrectionTip")}
@@ -1626,6 +1754,7 @@ export default function App({ onBakedObjHandoff, shellTheme = "dark", reloadData
                   setBakedScene(null);
                   setBakeReport(null);
                   setBakeError(null);
+                  notifyStatus("Texture Baking: bake colour correction reset. Bake result cleared.");
                 }}
                 disabled={(sameTextureColourCorrection(pendingBakeColourCorrection, defaultTextureColourCorrection) && sameTextureColourCorrection(appliedBakeColourCorrection, defaultTextureColourCorrection)) || busy || bakeBusy}
                 title={t("resetBakeColourCorrectionTip")}

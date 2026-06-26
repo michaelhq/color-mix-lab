@@ -2963,3 +2963,39 @@ textarea { font: inherit; }
 .cml-texture-pane .texture-correction-row .number {
   width: 58px !important;
 }
+
+/* Texture Baking health indicators for Diagnostics and Checks. */
+.cml-texture-pane .sidebar-tabs button.has-health,
+.cml-texture-pane .texture-tabs button.has-health {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 8px !important;
+}
+
+.cml-texture-pane .sidebar-tab-label {
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.cml-texture-pane .tab-health-dot {
+  flex: 0 0 auto !important;
+  width: 9px !important;
+  height: 9px !important;
+  border-radius: 999px !important;
+  border: 1px solid rgba(255, 255, 255, 0.56) !important;
+  background: #7a8795 !important;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.16) !important;
+}
+
+.cml-texture-pane .tab-health-dot.ok { background: #20b26b !important; }
+.cml-texture-pane .tab-health-dot.warning { background: #f59e0b !important; }
+.cml-texture-pane .tab-health-dot.error { background: #e05252 !important; }
+.cml-texture-pane .tab-health-dot.neutral { background: #7a8795 !important; }
+
+.cml-theme-light .cml-texture-pane .tab-health-dot {
+  border-color: rgba(20, 32, 43, 0.26) !important;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6) !important;
+}

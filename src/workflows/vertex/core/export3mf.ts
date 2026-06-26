@@ -286,10 +286,9 @@ function buildExportAssignments(plan: VirtualExtruderPlan): {
   // Full Spectrum virtual extruders can make PrusaSlicer treat affected facets
   // as unpainted/default-extruder areas.
   for (const entry of plan.physicalOnly) {
-    paletteToPaintCode.set(
-      entry.paletteIndex,
-      prusaMmuPaintCode(entry.physicalExtruder),
-    );
+    const code = prusaMmuPaintCode(entry.physicalExtruder);
+    for (const paletteIndex of entry.targetPaletteIndices)
+      paletteToPaintCode.set(paletteIndex, code);
   }
 
   virtuals.sort((a, b) => a.id - b.id);

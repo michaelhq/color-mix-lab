@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AccentProtectionMode,
   ColourAdjustments,
@@ -34,6 +34,7 @@ import {
 import {
   buildVirtualExtruderPlan,
   virtualExtruderPlanToCsv,
+  type PhysicalOnlyEntry,
   type VirtualBlendEntry,
   type VirtualExtruderPlan,
 } from "./core/virtualExtruders";
@@ -1242,6 +1243,17 @@ function compareText(a: string, b: string): number {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 }
 
+const BLEND_STEP_OPTIONS = [2.5, 5, 10, 20, 25] as const;
+type BlendStepPercent = (typeof BLEND_STEP_OPTIONS)[number];
+
+function normalizeBlendStepPercent(value: number, fallback: BlendStepPercent = 5): BlendStepPercent {
+  if (!Number.isFinite(value)) return fallback;
+  const rounded = Math.round(value * 10) / 10;
+  return BLEND_STEP_OPTIONS.includes(rounded as BlendStepPercent)
+    ? (rounded as BlendStepPercent)
+    : fallback;
+}
+
 function suggestionOptions(
   mode: SuggestionMode,
   expert: SuggestionExpertSettings,
@@ -1334,9 +1346,11 @@ function applyAssignmentOverridesToPlan(
   const physicalRgbByExtruder = new Map(
     physicalSlots.map((slot) => [slot.slot, slot.filament.effectiveRgb]),
   );
-  const basePhysicalByPaletteIndex = new Map(
-    basePlan.physicalOnly.map((entry) => [entry.paletteIndex, entry]),
-  );
+  const basePhysicalByPaletteIndex = new Map<number, PhysicalOnlyEntry>();
+  for (const entry of basePlan.physicalOnly) {
+    for (const paletteIndex of entry.targetPaletteIndices)
+      basePhysicalByPaletteIndex.set(paletteIndex, entry);
+  }
   const paletteToAssignment = new Map<
     number,
     | { kind: "physical"; extruder: number }
@@ -1405,25 +1419,32 @@ function applyAssignmentOverridesToPlan(
   virtualBlends.sort((a, b) => a.virtualId - b.virtualId);
 
   const physicalOnly = [...physicalPaletteIndices.entries()]
-    .flatMap(([extruder, indices]) => {
+    .map(([extruder, indices]) => {
+      const sorted = [...indices].sort((a, b) => a - b);
       const rawPhysicalRgb =
         physicalRgbByExtruder.get(extruder) ?? ([120, 120, 120] as RGB);
-      return indices.map((paletteIndex) => {
+      const basePhysical = sorted
+        .map((paletteIndex) => basePhysicalByPaletteIndex.get(paletteIndex))
+        .find((entry) => entry?.physicalExtruder === extruder);
+      const physicalRgb = basePhysical?.physicalRgb ?? rawPhysicalRgb;
+      const triangleCount = sorted.reduce(
+        (sum, paletteIndex) => sum + (paletteByIndex.get(paletteIndex)?.count ?? 0),
+        0,
+      );
+      const linearRgbError = sorted.reduce((maxError, paletteIndex) => {
         const p = paletteByIndex.get(paletteIndex);
-        const basePhysical = basePhysicalByPaletteIndex.get(paletteIndex);
-        const physicalRgb =
-          basePhysical && basePhysical.physicalExtruder === extruder
-            ? basePhysical.physicalRgb
-            : rawPhysicalRgb;
-        return {
-          paletteIndex,
-          targetRgb: p?.rgb ?? physicalRgb,
-          physicalRgb,
-          physicalExtruder: extruder,
-          triangleCount: p?.count ?? 0,
-          linearRgbError: p ? simpleRgbDistance(p.rgb, rawPhysicalRgb) : 0,
-        };
-      });
+        return Math.max(maxError, p ? simpleRgbDistance(p.rgb, rawPhysicalRgb) : 0);
+      }, 0);
+      const firstPalette = paletteByIndex.get(sorted[0] ?? -1);
+      return {
+        paletteIndex: sorted[0] ?? extruder,
+        targetPaletteIndices: sorted,
+        targetRgb: firstPalette?.rgb ?? physicalRgb,
+        physicalRgb,
+        physicalExtruder: extruder,
+        triangleCount,
+        linearRgbError,
+      };
     })
     .sort((a, b) => a.paletteIndex - b.paletteIndex);
 
@@ -1462,6 +1483,7 @@ interface VertexColorMixAppProps {
   shellTheme?: ResolvedPreviewBackground;
   hideTopbarControls?: boolean;
   reloadDataNonce?: number;
+  onStatusChange?: (message: string) => void;
 }
 
 export default function App({
@@ -1469,6 +1491,7 @@ export default function App({
   incomingObjNonce = 0,
   focusLoadTabNonce = 0,
   onIncomingObjConsumed,
+  onStatusChange,
   shellTheme,
   hideTopbarControls = false,
   reloadDataNonce = 0,
@@ -1488,7 +1511,15 @@ export default function App({
   const [model, setModel] = useState<MeshModel | null>(null);
   const [largeModelComputationsDeferred, setLargeModelComputationsDeferred] =
     useState(false);
-  const [, setStatus] = useState(t.statusReady);
+  const statusRef = useRef(t.statusReady);
+  const setStatus = useCallback((nextStatus: React.SetStateAction<string>) => {
+    const resolvedStatus =
+      typeof nextStatus === "function"
+        ? nextStatus(statusRef.current)
+        : nextStatus;
+    statusRef.current = resolvedStatus;
+    onStatusChange?.(resolvedStatus);
+  }, [onStatusChange]);
   const [fileLoadBusy, setFileLoadBusy] = useState(false);
   const [pendingObjFile, setPendingObjFile] = useState<File | null>(null);
   const [pendingTemplateFile, setPendingTemplateFile] = useState<File | null>(
@@ -1501,8 +1532,8 @@ export default function App({
 
   const [pendingMaxColours, setPendingMaxColours] = useState(128);
   const [appliedMaxColours, setAppliedMaxColours] = useState(128);
-  const [pendingBlendStepPercent, setPendingBlendStepPercent] = useState(5);
-  const [appliedBlendStepPercent, setAppliedBlendStepPercent] = useState(5);
+  const [pendingBlendStepPercent, setPendingBlendStepPercent] = useState<BlendStepPercent>(5);
+  const [appliedBlendStepPercent, setAppliedBlendStepPercent] = useState<BlendStepPercent>(5);
   const [pendingAccentProtection, setPendingAccentProtection] =
     useState<AccentProtectionMode>("off");
   const [appliedAccentProtection, setAppliedAccentProtection] =
@@ -1782,7 +1813,7 @@ export default function App({
     setStatus((prev) =>
       prev === "Ready." || prev === "Bereit." ? t.statusReady : prev,
     );
-  }, [t.statusReady]);
+  }, [setStatus, t.statusReady]);
 
   useEffect(() => {
     if (pendingPhysicalColourSource !== "preset") return;
@@ -2434,14 +2465,14 @@ export default function App({
       settings.pendingBlendStepPercent,
       pendingBlendStepPercent,
     );
-    const nextPendingBlendStep = pendingBlendStepFromFile === 2.5 ? 2.5 : 5;
-    const nextAppliedBlendStep =
-      numberSetting(
-        settings.appliedBlendStepPercent,
-        pendingBlendStepFromFile,
-      ) === 2.5
-        ? 2.5
-        : 5;
+    const nextPendingBlendStep = normalizeBlendStepPercent(
+      pendingBlendStepFromFile,
+      appliedBlendStepPercent,
+    );
+    const nextAppliedBlendStep = normalizeBlendStepPercent(
+      numberSetting(settings.appliedBlendStepPercent, pendingBlendStepFromFile),
+      nextPendingBlendStep,
+    );
     const nextPendingAccentProtection = isAccentProtectionMode(
       settings.pendingAccentProtection,
     )
@@ -2991,12 +3022,15 @@ export default function App({
 
   function normalizeMaxColours(value: number): number {
     if (!Number.isFinite(value)) return appliedMaxColours;
-    return Math.max(1, Math.min(250, Math.round(value)));
+    return Math.max(1, Math.min(256, Math.round(value)));
   }
 
   function handleApplyPaletteSettings() {
     const next = normalizeMaxColours(pendingMaxColours);
-    const nextStep = pendingBlendStepPercent === 2.5 ? 2.5 : 5;
+    const nextStep = normalizeBlendStepPercent(
+      pendingBlendStepPercent,
+      appliedBlendStepPercent,
+    );
     const nextAccentProtection = isAccentProtectionMode(pendingAccentProtection)
       ? pendingAccentProtection
       : "off";
@@ -3254,7 +3288,8 @@ export default function App({
         map.set(paletteIndex, entry.displayRgb);
     }
     for (const entry of virtualExtruderPlan.physicalOnly) {
-      map.set(entry.paletteIndex, entry.physicalRgb);
+      for (const paletteIndex of entry.targetPaletteIndices)
+        map.set(paletteIndex, entry.physicalRgb);
     }
     return map;
   }, [virtualExtruderPlan]);
@@ -3392,7 +3427,7 @@ export default function App({
         rgb: entry.physicalRgb,
         count: entry.triangleCount,
         label: `E${entry.physicalExtruder}`,
-        title: `#${entry.paletteIndex} → E${entry.physicalExtruder} · ${rgbToHex(entry.targetRgb)} → ${rgbToHex(entry.physicalRgb)} · ${entry.triangleCount.toLocaleString()} ${t.trianglesShort}`,
+        title: `E${entry.physicalExtruder} · ${entry.triangleCount.toLocaleString()} ${t.trianglesShort} · ${paletteIndexPreview(entry.targetPaletteIndices, 8)}`,
         selected: selectedAssignmentKeys.includes(`p:${entry.paletteIndex}`),
       })),
     ];
@@ -3416,6 +3451,10 @@ export default function App({
   }, [virtualExtruderPlan, virtualPlanFilter]);
 
   const filteredPhysicalOnly = useMemo(() => {
+    if (virtualPlanFilter === "merged")
+      return virtualExtruderPlan.physicalOnly.filter(
+        (entry) => entry.targetPaletteIndices.length > 1,
+      );
     return virtualPlanFilter === "all" || virtualPlanFilter === "physical"
       ? virtualExtruderPlan.physicalOnly
       : [];
@@ -3432,6 +3471,10 @@ export default function App({
     }
     if (key.startsWith("p:")) {
       const paletteIndex = Number(key.slice(2));
+      const physicalEntry = virtualExtruderPlan.physicalOnly.find(
+        (entry) => entry.paletteIndex === paletteIndex,
+      );
+      if (physicalEntry) return physicalEntry.targetPaletteIndices;
       return Number.isFinite(paletteIndex) ? [paletteIndex] : [];
     }
     return [];
@@ -4127,7 +4170,7 @@ export default function App({
                   <input
                     type="number"
                     min={1}
-                    max={250}
+                    max={256}
                     value={pendingMaxColours}
                     onChange={(e) =>
                       setPendingMaxColours(Number(e.target.value))
@@ -4141,11 +4184,19 @@ export default function App({
                   <select
                     value={pendingBlendStepPercent}
                     onChange={(e) =>
-                      setPendingBlendStepPercent(Number(e.target.value))
+                      setPendingBlendStepPercent(
+                        normalizeBlendStepPercent(
+                          Number(e.target.value),
+                          pendingBlendStepPercent,
+                        ),
+                      )
                     }
                   >
-                    <option value={5}>5%</option>
-                    <option value={2.5}>2.5%</option>
+                    {BLEND_STEP_OPTIONS.map((step) => (
+                      <option key={step} value={step}>
+                        {step}%
+                      </option>
+                    ))}
                   </select>
                 </label>
                 <label className="inline-row" title={t.tipAccentProtection}>
@@ -4476,7 +4527,7 @@ export default function App({
                             {filteredPhysicalOnly.map((entry) => (
                               <div
                                 className="virtual-plan-row physical selectable"
-                                key={`physical-${entry.paletteIndex}`}
+                                key={`physical-${entry.physicalExtruder}-${entry.paletteIndex}`}
                               >
                                 <input
                                   type="checkbox"
@@ -4492,12 +4543,12 @@ export default function App({
                                 />
                                 <Swatch
                                   rgb={entry.physicalRgb}
-                                  title={`#${entry.paletteIndex}: ${rgbToHex(entry.targetRgb)} → E${entry.physicalExtruder}: ${rgbToHex(entry.physicalRgb)}`}
+                                  title={`E${entry.physicalExtruder}: ${paletteIndexPreview(entry.targetPaletteIndices, 8)} → ${rgbToHex(entry.physicalRgb)}`}
                                 />
-                                <b>#{entry.paletteIndex}</b>
+                                <b>E{entry.physicalExtruder}</b>
                                 <span
                                   className="virtual-plan-components"
-                                  title={`#${entry.paletteIndex}: ${rgbToHex(entry.targetRgb)} → ${rgbToHex(entry.physicalRgb)}`}
+                                  title={`E${entry.physicalExtruder}: ${paletteIndexPreview(entry.targetPaletteIndices, 8)} → ${rgbToHex(entry.physicalRgb)}`}
                                 >
                                   <span className="component-piece">
                                     <ExtruderBadge
@@ -4512,8 +4563,14 @@ export default function App({
                                   slotRgbByNumber={physicalSlotRgbByNumber}
                                   title={`E${entry.physicalExtruder} 100%`}
                                 />
-                                <small>
-                                  {t.paletteColour} #{entry.paletteIndex}
+                                <small
+                                  title={paletteIndexTitle(
+                                    entry.targetPaletteIndices,
+                                  )}
+                                >
+                                  {entry.targetPaletteIndices.length > 1
+                                    ? `${entry.targetPaletteIndices.length} ${t.mergedPaletteColours}: ${paletteIndexPreview(entry.targetPaletteIndices, 5)}`
+                                    : `${t.paletteColour} #${entry.targetPaletteIndices[0]}`}
                                 </small>
                               </div>
                             ))}

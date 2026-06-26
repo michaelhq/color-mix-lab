@@ -16,7 +16,7 @@ interface BakedObjHandoffPayload {
   faceCount: number;
 }
 
-const APP_VERSION = "0.7.0";
+const APP_VERSION = "0.7.8";
 const THEME_STORAGE_KEY = "color-mix-lab-theme-mode";
 
 function getSystemTheme(): ResolvedTheme {
@@ -140,6 +140,7 @@ export default function App() {
         <div className="cml-workflow-pane cml-texture-pane" style={{ display: activeWorkflow === "texture" ? "block" : "none", height: "100%" }}>
           <TextureBakeWorkflow
             onBakedObjHandoff={handleBakedObjHandoff}
+            onStatusChange={setGlobalStatus}
             shellTheme={resolvedTheme}
             reloadDataNonce={reloadDataNonce}
           />
@@ -150,6 +151,7 @@ export default function App() {
             incomingObjNonce={handoffNonce}
             focusLoadTabNonce={vertexLoadFocusNonce}
             onIncomingObjConsumed={() => setHandoffFile(null)}
+            onStatusChange={setGlobalStatus}
             shellTheme={resolvedTheme}
             hideTopbarControls
             reloadDataNonce={reloadDataNonce}
