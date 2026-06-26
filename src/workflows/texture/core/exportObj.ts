@@ -34,6 +34,15 @@ function positionKey(p: THREE.Vector3): string {
   return `${quantizePosition(p.x)},${quantizePosition(p.y)},${quantizePosition(p.z)}`;
 }
 
+
+function texturePreviewYUpToPrinterZUp(p: THREE.Vector3): THREE.Vector3 {
+  // Texture Baking previews imported GLB/glTF/OBJ scenes with Three.js Y-up
+  // semantics. VertexColor 2 ColorMix and the baked OBJ handoff use the
+  // printer/OBJ convention where Z is up. Rotate +90° around X so the Texture
+  // Baking top view remains the VertexColor top view after handoff/export.
+  return new THREE.Vector3(p.x, -p.z, p.y);
+}
+
 interface WeldedVertex {
   position: THREE.Vector3;
   colorR: number;
@@ -94,8 +103,9 @@ export function exportBakedSceneToVertexColorObj(
 
       for (let corner = 0; corner < 3; corner += 1) {
         const local = index ? index.getX(tri * 3 + corner) : tri * 3 + corner;
-        const p = new THREE.Vector3(position.getX(local), position.getY(local), position.getZ(local))
+        const worldPosition = new THREE.Vector3(position.getX(local), position.getY(local), position.getZ(local))
           .applyMatrix4(matrixWorld);
+        const p = texturePreviewYUpToPrinterZUp(worldPosition);
 
         let cornerRgb: [number, number, number] = [0.8, 0.8, 0.8];
         if (color) {
@@ -139,13 +149,14 @@ export function exportBakedSceneToVertexColorObj(
 
   const objLines: string[] = [];
   objLines.push('# VC2CM Texture Lab baked vertex-color OBJ');
+  objLines.push('# Color Mix Lab coordinate mode: keep');
   objLines.push('# Handoff format for VertexColor2ColorMix. Colors are embedded as: v x y z r g b');
   objLines.push('# Vertices are welded by position; colors at shared vertices are averaged.');
-  objLines.push('# Coordinates are rebased to local bounding-box center before scaling.');
-  objLines.push(`# Raw world bbox min: ${formatNumber(rawMin.x)} ${formatNumber(rawMin.y)} ${formatNumber(rawMin.z)}`);
-  objLines.push(`# Raw world bbox max: ${formatNumber(rawMax.x)} ${formatNumber(rawMax.y)} ${formatNumber(rawMax.z)}`);
-  objLines.push(`# Raw world bbox size: ${formatNumber(rawSize.x)} ${formatNumber(rawSize.y)} ${formatNumber(rawSize.z)}`);
-  objLines.push(`# Local origin subtracted before export: ${formatNumber(rawCenter.x)} ${formatNumber(rawCenter.y)} ${formatNumber(rawCenter.z)}`);
+  objLines.push('# Coordinates are rotated from Texture Baking Y-up to printer Z-up, then rebased to local bounding-box center before scaling.');
+  objLines.push(`# Exported printer-space bbox min: ${formatNumber(rawMin.x)} ${formatNumber(rawMin.y)} ${formatNumber(rawMin.z)}`);
+  objLines.push(`# Exported printer-space bbox max: ${formatNumber(rawMax.x)} ${formatNumber(rawMax.y)} ${formatNumber(rawMax.z)}`);
+  objLines.push(`# Exported printer-space bbox size: ${formatNumber(rawSize.x)} ${formatNumber(rawSize.y)} ${formatNumber(rawSize.z)}`);
+  objLines.push(`# Local printer-space origin subtracted before export: ${formatNumber(rawCenter.x)} ${formatNumber(rawCenter.y)} ${formatNumber(rawCenter.z)}`);
   objLines.push(`# Export scale applied to vertex coordinates after rebasing: ${formatNumber(safeScale)}x`);
   objLines.push(`o ${fileBase}`);
 

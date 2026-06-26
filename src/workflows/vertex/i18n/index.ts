@@ -28,6 +28,10 @@ const en: Dict = {
   colouredVertices: "Coloured vertices",
   uniqueFaceColours: "Unique face colours",
   colours: "Colours",
+  modelOrientation: "Model orientation",
+  bottomSide: "Bottom side",
+  applyOrientation: "Apply orientation",
+  resetOrientation: "Reset orientation",
   paletteAndVirtualColours: "Palette and virtual mixtures",
   paletteWorkflowIntro:
     "Build the reduced target palette from the applied model colour correction, then map it to printable physical and virtual extruder mixtures.",
@@ -291,6 +295,12 @@ const en: Dict = {
     "Rebuilds adjusted colours, reduced palette, and WebGL preview from the current slider values.",
   tipResetAdjustments:
     "Resets the pending colour-adjustment sliders to neutral values. Click Apply afterwards to rebuild the preview.",
+  tipModelOrientation:
+    "Rotates the loaded model geometry in 90° steps so the selected side faces the build plate. Vertex colours are kept; preview, palette, print simulation and 3MF export use the oriented geometry.",
+  tipApplyOrientation:
+    "Applies the selected orientation to the loaded model geometry and refits the preview.",
+  tipResetOrientation:
+    "Restores the loaded model to its original imported orientation and refits the preview.",
   tipMaxColours:
     "Maximum number of virtual target colours after palette reduction, up to 256. This is the reduced target palette; coarse mixing steps may map several target colours to fewer printable blends. This does not limit the number of physical extruder slots.",
   tipBlendStepPercent:

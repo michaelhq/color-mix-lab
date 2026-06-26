@@ -12,6 +12,25 @@ export interface CameraSyncState {
 
 type PreviewView = "right" | "front" | "left" | "back" | "top" | "bottom";
 
+const AXIS_LABEL_DEFINITIONS = [
+  { key: "posX", label: "+X", className: "axis-label-x" },
+  { key: "negX", label: "-X", className: "axis-label-x" },
+  { key: "posY", label: "+Y", className: "axis-label-y" },
+  { key: "negY", label: "-Y", className: "axis-label-y" },
+  { key: "posZ", label: "+Z", className: "axis-label-z" },
+  { key: "negZ", label: "-Z", className: "axis-label-z" },
+] as const;
+
+type AxisLabelKey = (typeof AXIS_LABEL_DEFINITIONS)[number]["key"];
+
+type AxisLabelRefs = Partial<Record<AxisLabelKey, HTMLSpanElement | null>>;
+
+interface AxisGuideGeometry {
+  positions: Float32Array;
+  colors: Float32Array;
+  labels: Record<AxisLabelKey, THREE.Vector3>;
+}
+
 const PREVIEW_LIGHT_BACKGROUND = 0x9a9a9a;
 const PREVIEW_DARK_BACKGROUND = 0x20242a;
 
@@ -51,6 +70,7 @@ interface ModelPreviewProps {
   scene: THREE.Object3D | null;
   wireframe: boolean;
   showAxes?: boolean;
+  showAxisLabels?: boolean;
   view?: PreviewView;
   fitSignal?: number;
   resetSignal?: number;
@@ -407,10 +427,7 @@ function addWireframeOverlay(root: THREE.Object3D, darkMode: boolean): void {
   lineMaterial.dispose();
 }
 
-function makeAxesHelper(root: THREE.Object3D): THREE.LineSegments | null {
-  const box = meshBounds(root);
-  if (box.isEmpty()) return null;
-
+function makeAxisGuideGeometry(box: THREE.Box3): AxisGuideGeometry {
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
   const maxDim = Math.max(size.x, size.y, size.z, 0.001);
@@ -420,20 +437,36 @@ function makeAxesHelper(root: THREE.Object3D): THREE.LineSegments | null {
   const halfY = Math.max(size.y / 2 + margin, minHalfExtent);
   const halfZ = Math.max(size.z / 2 + margin, minHalfExtent);
 
-  const positions = new Float32Array([
-    center.x - halfX, center.y, center.z, center.x + halfX, center.y, center.z,
-    center.x, center.y - halfY, center.z, center.x, center.y + halfY, center.z,
-    center.x, center.y, center.z - halfZ, center.x, center.y, center.z + halfZ,
-  ]);
-  const colors = new Float32Array([
-    1, 0.12, 0.02, 1, 0.12, 0.02,
-    0.2, 1, 0.05, 0.2, 1, 0.05,
-    0, 0.72, 1, 0, 0.72, 1,
-  ]);
+  return {
+    positions: new Float32Array([
+      center.x - halfX, center.y, center.z, center.x + halfX, center.y, center.z,
+      center.x, center.y - halfY, center.z, center.x, center.y + halfY, center.z,
+      center.x, center.y, center.z - halfZ, center.x, center.y, center.z + halfZ,
+    ]),
+    colors: new Float32Array([
+      1, 0.12, 0.02, 1, 0.12, 0.02,
+      0.2, 1, 0.05, 0.2, 1, 0.05,
+      0, 0.72, 1, 0, 0.72, 1,
+    ]),
+    labels: {
+      negX: new THREE.Vector3(center.x - halfX, center.y, center.z),
+      posX: new THREE.Vector3(center.x + halfX, center.y, center.z),
+      negY: new THREE.Vector3(center.x, center.y - halfY, center.z),
+      posY: new THREE.Vector3(center.x, center.y + halfY, center.z),
+      negZ: new THREE.Vector3(center.x, center.y, center.z - halfZ),
+      posZ: new THREE.Vector3(center.x, center.y, center.z + halfZ),
+    },
+  };
+}
+
+function makeAxesHelper(root: THREE.Object3D): THREE.LineSegments | null {
+  const box = meshBounds(root);
+  if (box.isEmpty()) return null;
+  const guide = makeAxisGuideGeometry(box);
 
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  geometry.setAttribute("position", new THREE.BufferAttribute(guide.positions, 3));
+  geometry.setAttribute("color", new THREE.BufferAttribute(guide.colors, 3));
   const material = new THREE.LineBasicMaterial({
     vertexColors: true,
     // Use normal depth testing so axes behind the model are hidden. The axes
@@ -459,10 +492,59 @@ function disposeAxesHelper(axes: THREE.LineSegments): void {
   else material.dispose();
 }
 
+function hideAxisLabelElements(labelRefs: AxisLabelRefs): void {
+  for (const definition of AXIS_LABEL_DEFINITIONS) {
+    const element = labelRefs[definition.key];
+    if (!element) continue;
+    element.style.display = "none";
+  }
+}
+
+function updateAxisLabelElements(
+  root: THREE.Object3D | null,
+  camera: THREE.PerspectiveCamera | null,
+  container: HTMLDivElement | null,
+  labelRefs: AxisLabelRefs,
+  visible: boolean,
+): void {
+  if (!visible || !root || !camera || !container) {
+    hideAxisLabelElements(labelRefs);
+    return;
+  }
+
+  const box = meshBounds(root);
+  if (box.isEmpty()) {
+    hideAxisLabelElements(labelRefs);
+    return;
+  }
+
+  const guide = makeAxisGuideGeometry(box);
+  const width = container.clientWidth;
+  const height = container.clientHeight;
+  if (width <= 0 || height <= 0) {
+    hideAxisLabelElements(labelRefs);
+    return;
+  }
+
+  for (const definition of AXIS_LABEL_DEFINITIONS) {
+    const element = labelRefs[definition.key];
+    if (!element) continue;
+    const projected = guide.labels[definition.key].clone().project(camera);
+    if (projected.z < -1 || projected.z > 1) {
+      element.style.display = "none";
+      continue;
+    }
+    element.style.display = "block";
+    element.style.left = `${(projected.x * 0.5 + 0.5) * width}px`;
+    element.style.top = `${(-projected.y * 0.5 + 0.5) * height}px`;
+  }
+}
+
 export default function ModelPreview({
   scene,
   wireframe,
   showAxes = false,
+  showAxisLabels = false,
   view = "right",
   fitSignal = 0,
   resetSignal = 0,
@@ -486,6 +568,8 @@ export default function ModelPreview({
   const threeSceneRef = useRef<THREE.Scene | null>(null);
   const modelRootRef = useRef<THREE.Object3D | null>(null);
   const axesRef = useRef<THREE.LineSegments | null>(null);
+  const axisLabelRefs = useRef<AxisLabelRefs>({});
+  const showAxisLabelsRef = useRef(showAxisLabels);
   const lastCameraStateRef = useRef<CameraSyncState | null>(null);
   const lastSceneRef = useRef<THREE.Object3D | null>(null);
   const lastViewRef = useRef<PreviewView>(view);
@@ -496,6 +580,11 @@ export default function ModelPreview({
   useEffect(() => {
     syncEnabledRef.current = syncEnabled;
   }, [syncEnabled]);
+
+  useEffect(() => {
+    showAxisLabelsRef.current = showAxisLabels;
+    if (!showAxisLabels) hideAxisLabelElements(axisLabelRefs.current);
+  }, [showAxisLabels]);
 
   useEffect(() => {
     onSyncChangeRef.current = onSyncChange;
@@ -632,6 +721,13 @@ export default function ModelPreview({
     const animate = () => {
       frame = requestAnimationFrame(animate);
       controls.update();
+      updateAxisLabelElements(
+        modelRootRef.current,
+        camera,
+        container,
+        axisLabelRefs.current,
+        showAxisLabelsRef.current,
+      );
       renderer.render(threeScene, camera);
     };
 
@@ -732,20 +828,32 @@ export default function ModelPreview({
       axesRef.current = null;
     }
 
-    if (showAxes && root) {
+    if ((showAxes || showAxisLabels) && root) {
       const axes = makeAxesHelper(root);
       if (axes) {
         axesRef.current = axes;
         threeScene.add(axes);
       }
     }
-  }, [showAxes, scene, view, darkMode]);
+    if (!showAxisLabels) hideAxisLabelElements(axisLabelRefs.current);
+  }, [showAxes, showAxisLabels, scene, view, darkMode]);
 
   return (
     <div
       className={`three-preview-wrap ${darkMode ? "preview-bg-dark" : "preview-bg-light"}`}
     >
       <div ref={containerRef} className="three-preview" />
+      {AXIS_LABEL_DEFINITIONS.map((definition) => (
+        <span
+          key={definition.key}
+          ref={(element) => {
+            axisLabelRefs.current[definition.key] = element;
+          }}
+          className={`axis-label ${definition.className}`}
+        >
+          {definition.label}
+        </span>
+      ))}
       {!scene && <div className="preview-empty">{emptyText}</div>}
       {busy && <div className="preview-busy">Building preview...</div>}
       {scene && (

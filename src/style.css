@@ -147,6 +147,28 @@ textarea { width: 100%; min-height: 150px; resize: vertical; line-height: 1.4; f
 .three-preview-wrap.preview-bg-dark { background: linear-gradient(180deg, #2b3037 0%, #171b20 100%); }
 .three-preview { width: 100%; height: 100%; }
 .three-preview canvas { display: block; width: 100%; height: 100%; }
+.axis-label {
+  position: absolute;
+  z-index: 8;
+  display: none;
+  min-width: 2.1rem;
+  padding: 0.12rem 0.32rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  color: #ffffff;
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1.15;
+  text-align: center;
+  pointer-events: none;
+  user-select: none;
+  transform: translate(-50%, -50%);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.72);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.34);
+}
+.axis-label-x { background: rgba(232, 49, 33, 0.92); }
+.axis-label-y { background: rgba(42, 184, 47, 0.92); }
+.axis-label-z { background: rgba(0, 154, 218, 0.94); }
 .preview-empty { position: absolute; inset: 0; display: grid; place-items: center; color: #5d6875; font-weight: 700; pointer-events: none; }
 .preview-badge { position: absolute; right: 12px; bottom: 12px; padding: 5px 8px; border-radius: 8px; background: rgba(255,255,255,0.82); color: #14202b; font-size: 0.8rem; box-shadow: 0 2px 10px rgba(0,0,0,0.12); }
 .preview-bg-dark .preview-badge { background: rgba(15,20,26,0.86); color: #e8eef5; }
@@ -1733,6 +1755,28 @@ button.secondary.compact {
 .cml-texture-pane .three-preview-wrap.preview-bg-light { border-color: #d7dee8; }
 .cml-texture-pane .three-preview { width: 100%; height: 100%; }
 .cml-texture-pane .three-preview canvas { display: block; width: 100%; height: 100%; }
+.axis-label {
+  position: absolute;
+  z-index: 8;
+  display: none;
+  min-width: 2.1rem;
+  padding: 0.12rem 0.32rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  color: #ffffff;
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1.15;
+  text-align: center;
+  pointer-events: none;
+  user-select: none;
+  transform: translate(-50%, -50%);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.72);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.34);
+}
+.axis-label-x { background: rgba(232, 49, 33, 0.92); }
+.axis-label-y { background: rgba(42, 184, 47, 0.92); }
+.axis-label-z { background: rgba(0, 154, 218, 0.94); }
 .cml-texture-pane .preview-empty {
   position: absolute;
   inset: 0;
@@ -2011,6 +2055,7 @@ button.secondary.compact {
 
 .cml-texture-pane .texture-section { display: none; }
 .cml-texture-pane [data-active-tab="load"] .texture-load-section,
+.cml-texture-pane [data-active-tab="orientation"] .texture-orientation-section,
 .cml-texture-pane [data-active-tab="correction"] .texture-correction-section,
 .cml-texture-pane [data-active-tab="bake"] .texture-bake-section,
 .cml-texture-pane [data-active-tab="export"] .texture-export-section,
