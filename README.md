@@ -2,7 +2,9 @@
 
 **Color Mix Lab** is a browser-based tool for converting textured or vertex-coloured 3D models into PrusaSlicer-compatible 3MF projects using virtual colour and extruder mixes.
 
-**Try the live app:** [michaelhq.github.io/color-mix-lab](https://michaelhq.github.io/color-mix-lab/)
+**Try the live app:** [Color Mix Lab Github Page](https://michaelhq.github.io/color-mix-lab/)
+
+**Download the bust of Nefertiti Colot Mix Lab project files:** [Nefertiti ColorMix - created with Color Mix Lab](https://www.printables.com/model/1764574-nefertiti-colormix-created-with-color-mix-lab/)
 
 It is an experimental lab and reference workflow for preparing colour-rich 3D models for PrusaSlicer ColorMix / virtual extruder workflows.
 
