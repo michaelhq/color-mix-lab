@@ -29,19 +29,7 @@ export const IDENTITY_ORIENTATION_MATRIX: OrientationMatrix = [
   0, 0, 1,
 ];
 
-export const MODEL_BOTTOM_SIDE_OPTIONS: Array<{
-  value: ModelBottomSide;
-  label: string;
-}> = [
-  { value: "current", label: "Current" },
-  { value: "posX", label: "+X side down" },
-  { value: "negX", label: "-X side down" },
-  { value: "posY", label: "+Y side down" },
-  { value: "negY", label: "-Y side down" },
-  { value: "posZ", label: "+Z side down" },
-  { value: "negZ", label: "-Z side down" },
-];
-
+// Legacy support for project files saved by the previous bottom-side dropdown.
 export function isModelBottomSide(value: unknown): value is ModelBottomSide {
   return (
     value === "current" ||
@@ -51,13 +39,6 @@ export function isModelBottomSide(value: unknown): value is ModelBottomSide {
     value === "negY" ||
     value === "posZ" ||
     value === "negZ"
-  );
-}
-
-export function modelBottomSideLabel(value: ModelBottomSide): string {
-  return (
-    MODEL_BOTTOM_SIDE_OPTIONS.find((option) => option.value === value)?.label ??
-    "Current"
   );
 }
 

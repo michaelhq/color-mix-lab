@@ -1551,8 +1551,6 @@ export default function App({
   const [forceThreePreview, setForceThreePreview] = useState(false);
 
   const [model, setModel] = useState<MeshModel | null>(null);
-  const [appliedModelBottomSide, setAppliedModelBottomSide] =
-    useState<ModelBottomSide>("current");
   const [fineRotationAxis, setFineRotationAxis] =
     useState<ModelRotationAxis>("z");
   const [fineRotationAngle, setFineRotationAngle] = useState(0);
@@ -2226,7 +2224,6 @@ export default function App({
     setStatus(t.loadingFile);
     setModel(null);
     baseModelRef.current = null;
-    setAppliedModelBottomSide("current");
     orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
     setLargeModelComputationsDeferred(false);
     setThreePreviewRequested(true);
@@ -2383,7 +2380,6 @@ export default function App({
     if (!baseModel) return;
     orientationMatrixRef.current = [...matrix];
     setModel(modelWithOrientationMatrix(baseModel, matrix));
-    setAppliedModelBottomSide("current");
     setStatus(`${t.modelOrientation}: ${actionLabel} (${sourceLabel}).`);
     window.requestAnimationFrame(() => previewRef.current?.fitToModel());
   }
@@ -2459,7 +2455,6 @@ export default function App({
   }
 
   function setVertexCurrentOrientation(): void {
-    setAppliedModelBottomSide("current");
     setFineRotationAngle(0);
     setStatus(`${t.modelOrientation}: current orientation set.`);
     window.requestAnimationFrame(() => previewRef.current?.fitToModel());
@@ -2467,7 +2462,6 @@ export default function App({
 
   async function resetVertexModelOrientation(sourceLabel = "model"): Promise<void> {
     setFineRotationAngle(0);
-    setAppliedModelBottomSide("current");
     await runVertexOrientationOperation(() =>
       setVertexModelOrientationMatrix(
         [...IDENTITY_ORIENTATION_MATRIX],
@@ -2502,7 +2496,6 @@ export default function App({
       previewMode,
       previewDisplayMode,
       webglLodMode,
-      modelBottomSide: appliedModelBottomSide,
       modelOrientationMatrix: orientationMatrixRef.current,
       physicalExtruders,
       physicalColourSource,
@@ -2736,14 +2729,12 @@ export default function App({
         );
       } else {
         orientationMatrixRef.current = matrix;
-        setAppliedModelBottomSide("current");
-      }
+          }
     } else if (isModelBottomSide(settings.modelBottomSide)) {
       if (baseModelRef.current && settings.modelBottomSide !== "current") {
         applyVertexModelOrientation(settings.modelBottomSide, "project");
       } else {
-        setAppliedModelBottomSide("current");
-        orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
+            orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
       }
     }
     const nextPresetName = stringSetting(settings.presetName, presetName);
@@ -3538,7 +3529,6 @@ export default function App({
     setProgressRun(null);
     setModel(null);
     baseModelRef.current = null;
-    setAppliedModelBottomSide("current");
     orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
     setLargeModelComputationsDeferred(false);
     setThreePreviewRequested(false);

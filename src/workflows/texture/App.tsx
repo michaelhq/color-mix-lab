@@ -1513,8 +1513,6 @@ export default function App({
   const [bakedScene, setBakedScene] = useState<THREE.Object3D | null>(null);
   const [diagnostics, setDiagnostics] = useState<MeshDiagnostics | null>(null);
   const [bakeReport, setBakeReport] = useState<TextureBakeReport | null>(null);
-  const [appliedModelBottomSide, setAppliedModelBottomSide] =
-    useState<ModelBottomSide>("current");
   const [fineRotationAxis, setFineRotationAxis] =
     useState<ModelRotationAxis>("z");
   const [fineRotationAngle, setFineRotationAngle] = useState(0);
@@ -1573,14 +1571,12 @@ export default function App({
   function sceneWithOrientationMatrix(
     baseScene: THREE.Object3D,
     matrix: OrientationMatrix,
-    bottomSide: ModelBottomSide,
   ): THREE.Object3D {
     const clonedSource = baseScene.clone(true);
     const wrapper = new THREE.Group();
     wrapper.name = baseScene.name;
     wrapper.userData = {
       ...baseScene.userData,
-      modelBottomSide: bottomSide,
       modelOrientationMatrix: matrix,
     };
     wrapper.add(clonedSource);
@@ -1603,13 +1599,12 @@ export default function App({
     const baseScene = baseSceneRef.current;
     if (!baseScene) return null;
     orientationMatrixRef.current = [...matrix];
-    const orientedScene = sceneWithOrientationMatrix(baseScene, matrix, "current");
+    const orientedScene = sceneWithOrientationMatrix(baseScene, matrix);
     const report =
       transformDiagnosticsBoundingBox(baseDiagnosticsRef.current, matrix) ??
       analyzeScene(orientedScene, fileInfo?.name ?? baseScene.name ?? "model");
     setScene(orientedScene);
     setDiagnostics(report);
-    setAppliedModelBottomSide("current");
     setBakedScene(null);
     setBakeReport(null);
     setBakeError(null);
@@ -1706,7 +1701,6 @@ export default function App({
   }
 
   function setTextureCurrentOrientation(): void {
-    setAppliedModelBottomSide("current");
     setFineRotationAngle(0);
     notifyStatus("Texture Baking: current orientation set.");
     setPreviewFitSignal((value) => value + 1);
@@ -1714,7 +1708,6 @@ export default function App({
 
   async function resetTextureModelOrientation(sourceLabel = "model"): Promise<MeshDiagnostics | null> {
     setFineRotationAngle(0);
-    setAppliedModelBottomSide("current");
     return runTextureOrientationOperation(() =>
       setTextureModelOrientationMatrix(
         [...IDENTITY_ORIENTATION_MATRIX],
@@ -1792,7 +1785,6 @@ export default function App({
         const orientedScene = sceneWithOrientationMatrix(
           parsed.scene,
           orientationMatrixRef.current,
-          "current",
         );
         const report = analyzeScene(orientedScene, parsed.mainFile.name);
         baseDiagnosticsRef.current = report;
@@ -1803,8 +1795,7 @@ export default function App({
         });
         setScene(orientedScene);
         setDiagnostics(report);
-        setAppliedModelBottomSide("current");
-        orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
+            orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
         setFileInfo({
           name: parsed.mainFile.name,
           size: files.reduce((sum, file) => sum + file.size, 0),
@@ -1880,7 +1871,6 @@ export default function App({
       wireframe,
       showAxes,
       syncPreviews,
-      modelBottomSide: appliedModelBottomSide,
       modelOrientationMatrix: orientationMatrixRef.current,
     };
   }
@@ -1995,14 +1985,12 @@ export default function App({
         );
       } else {
         orientationMatrixRef.current = matrix;
-        setAppliedModelBottomSide("current");
-      }
+          }
     } else if (isModelBottomSide(settings.modelBottomSide)) {
       if (baseSceneRef.current && settings.modelBottomSide !== "current")
         applyTextureModelOrientation(settings.modelBottomSide, "project");
       else {
-        setAppliedModelBottomSide("current");
-        orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
+            orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
       }
     }
   }
@@ -2261,7 +2249,6 @@ export default function App({
     setError(null);
     setBakeError(null);
     setCameraSyncState(null);
-    setAppliedModelBottomSide("current");
     notifyStatus("Texture Baking: model cleared.");
   };
 
