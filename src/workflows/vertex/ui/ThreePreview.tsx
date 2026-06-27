@@ -991,6 +991,8 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
 
     useEffect(() => {
       resetView(view);
+      const frame = window.requestAnimationFrame(() => resetView(view));
+      return () => window.cancelAnimationFrame(frame);
     }, [view, trianglesShown]);
 
     useEffect(() => {

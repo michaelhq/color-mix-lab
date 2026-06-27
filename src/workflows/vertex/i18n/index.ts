@@ -29,9 +29,18 @@ const en: Dict = {
   uniqueFaceColours: "Unique face colours",
   colours: "Colours",
   modelOrientation: "Model orientation",
-  bottomSide: "Bottom side",
-  applyOrientation: "Apply orientation",
-  resetOrientation: "Reset orientation",
+  rotate90: "Rotate 90°",
+  rotateLeft: "Rotate left",
+  rotateRight: "Rotate right",
+  rotateForward: "Rotate forward",
+  rotateBackward: "Rotate backward",
+  fineRotation: "Fine rotation",
+  rotationAxis: "Axis",
+  rotationAngle: "Angle",
+  applyFineRotation: "Apply fine rotation",
+  setCurrentOrientation: "Set current orientation",
+  resetImportedOrientation: "Reset to imported orientation",
+  orientationCurrent: "Current",
   paletteAndVirtualColours: "Palette and virtual mixtures",
   paletteWorkflowIntro:
     "Build the reduced target palette from the applied model colour correction, then map it to printable physical and virtual extruder mixtures.",
@@ -170,6 +179,10 @@ const en: Dict = {
   progressProjectRestoreFiles: "Restore embedded files",
   progressProjectRestoreState: "Restore processing state",
   progressProjectDone: "Done",
+  progressOrientationTitle: "Orient model",
+  progressOrientationPrepare: "Prepare orientation transform",
+  progressOrientationApply: "Apply geometry orientation",
+  progressOrientationRefresh: "Refresh preview",
   saveProjectContents: "Save contents",
   loadProjectContents: "Load contents",
   projectPartSettings: "Workflow state",
@@ -296,9 +309,13 @@ const en: Dict = {
   tipResetAdjustments:
     "Resets the pending colour-adjustment sliders to neutral values. Click Apply afterwards to rebuild the preview.",
   tipModelOrientation:
-    "Rotates the loaded model geometry in 90° steps so the selected side faces the build plate. Vertex colours are kept; preview, palette, print simulation and 3MF export use the oriented geometry.",
+    "Rotates the loaded model geometry. Use 90° rotations for coarse axis orientation and fine rotation for small angle corrections. Vertex colours are kept; preview, palette, print simulation and 3MF export use the oriented geometry.",
   tipApplyOrientation:
-    "Applies the selected orientation to the loaded model geometry and refits the preview.",
+    "Applies this 90° rotation to the current model orientation and refits the preview.",
+  tipFineRotation:
+    "Applies the selected degree rotation around the chosen model axis. Use small values for fine alignment corrections.",
+  tipSetCurrentOrientation:
+    "Keeps the current model orientation as the active working orientation and clears the pending fine-rotation value.",
   tipResetOrientation:
     "Restores the loaded model to its original imported orientation and refits the preview.",
   tipMaxColours:

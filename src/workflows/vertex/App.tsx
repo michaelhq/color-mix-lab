@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type {
   AccentProtectionMode,
   ColourAdjustments,
@@ -40,6 +46,21 @@ import {
 } from "./core/virtualExtruders";
 import { ThreePreview, type ThreePreviewHandle } from "./ui/ThreePreview";
 import { getDict, Lang } from "./i18n";
+import {
+  applyOrientationMatrixToVec3,
+  composeOrientationMatrices,
+  IDENTITY_ORIENTATION_MATRIX,
+  isIdentityOrientationMatrix,
+  isModelBottomSide,
+  isOrientationMatrix,
+  orientationMatrixForAxisAngle,
+  orientationMatrixForBottomSide,
+  orientationMatrixForQuarterTurn,
+  type ModelBottomSide,
+  type ModelRotationAxis,
+  type ModelRotationCommand,
+  type OrientationMatrix,
+} from "../common/modelOrientation";
 
 type View = "front" | "back" | "left" | "right" | "top" | "bottom";
 type PreviewMode = "adjusted" | "quantized" | "print";
@@ -51,6 +72,7 @@ type PreviewDisplayMode = "shaded" | "flat";
 type PhysicalColourSource = "preset" | "template" | "manual" | "suggestion";
 type SidebarTab =
   | "model"
+  | "orientation"
   | "adjustment"
   | "palette"
   | "template"
@@ -84,6 +106,7 @@ type ProgressKind =
   | "suggestion"
   | "export"
   | "adjustment"
+  | "orientation"
   | "project";
 
 interface ProgressRun {
@@ -151,6 +174,21 @@ function safeOutputFileName(
   const leaf = safeFileDisplayName(name, fallback);
   return (
     leaf.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "") || fallback
+  );
+}
+
+async function readFileHeaderText(file: File, maxBytes = 2048): Promise<string> {
+  try {
+    return await file.slice(0, maxBytes).text();
+  } catch {
+    return "";
+  }
+}
+
+function isPrinterSpaceTextureBakingObjHeader(header: string): boolean {
+  return (
+    header.includes("# Color Mix Lab coordinate mode: keep") ||
+    header.includes("Coordinates are rotated from Texture Baking Y-up to printer Z-up")
   );
 }
 
@@ -372,13 +410,14 @@ function isVirtualMixPriorityMode(
   value: unknown,
 ): value is VirtualMixPriorityMode {
   return (
-    value === "accurate" ||
-    value === "preserve-hue" ||
-    value === "avoid-muddy"
+    value === "accurate" || value === "preserve-hue" || value === "avoid-muddy"
   );
 }
 
-function normalizeVirtualPreviewLightness(value: unknown, fallback = 0): number {
+function normalizeVirtualPreviewLightness(
+  value: unknown,
+  fallback = 0,
+): number {
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(-90, Math.min(30, Math.round(n)));
@@ -793,8 +832,6 @@ function VirtualSequenceBar({
   );
 }
 
-
-
 function FileInputButton({
   label,
   accept,
@@ -910,7 +947,6 @@ function presetColourTokenLabel(
   if (token === "Dark Grey") return t.colourDarkGrey || "Dark Grey";
   return token;
 }
-
 
 function basePresetName(name: string): string | null {
   for (const base of ["CMYWK", "BRYWK", "CMYW", "BRYW", "CMW", "BRY"]) {
@@ -1246,7 +1282,10 @@ function compareText(a: string, b: string): number {
 const BLEND_STEP_OPTIONS = [2.5, 5, 10, 20, 25] as const;
 type BlendStepPercent = (typeof BLEND_STEP_OPTIONS)[number];
 
-function normalizeBlendStepPercent(value: number, fallback: BlendStepPercent = 5): BlendStepPercent {
+function normalizeBlendStepPercent(
+  value: number,
+  fallback: BlendStepPercent = 5,
+): BlendStepPercent {
   if (!Number.isFinite(value)) return fallback;
   const rounded = Math.round(value * 10) / 10;
   return BLEND_STEP_OPTIONS.includes(rounded as BlendStepPercent)
@@ -1327,7 +1366,6 @@ function virtualSequenceTitle(entry: VirtualBlendEntry): string {
 function paletteMapByIndex(palette: PaletteEntry[]): Map<number, PaletteEntry> {
   return new Map(palette.map((entry) => [entry.index, entry]));
 }
-
 
 function simpleRgbDistance(a: RGB, b: RGB): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
@@ -1428,12 +1466,16 @@ function applyAssignmentOverridesToPlan(
         .find((entry) => entry?.physicalExtruder === extruder);
       const physicalRgb = basePhysical?.physicalRgb ?? rawPhysicalRgb;
       const triangleCount = sorted.reduce(
-        (sum, paletteIndex) => sum + (paletteByIndex.get(paletteIndex)?.count ?? 0),
+        (sum, paletteIndex) =>
+          sum + (paletteByIndex.get(paletteIndex)?.count ?? 0),
         0,
       );
       const linearRgbError = sorted.reduce((maxError, paletteIndex) => {
         const p = paletteByIndex.get(paletteIndex);
-        return Math.max(maxError, p ? simpleRgbDistance(p.rgb, rawPhysicalRgb) : 0);
+        return Math.max(
+          maxError,
+          p ? simpleRgbDistance(p.rgb, rawPhysicalRgb) : 0,
+        );
       }, 0);
       const firstPalette = paletteByIndex.get(sorted[0] ?? -1);
       return {
@@ -1509,17 +1551,25 @@ export default function App({
   const [forceThreePreview, setForceThreePreview] = useState(false);
 
   const [model, setModel] = useState<MeshModel | null>(null);
+  const [appliedModelBottomSide, setAppliedModelBottomSide] =
+    useState<ModelBottomSide>("current");
+  const [fineRotationAxis, setFineRotationAxis] =
+    useState<ModelRotationAxis>("z");
+  const [fineRotationAngle, setFineRotationAngle] = useState(0);
   const [largeModelComputationsDeferred, setLargeModelComputationsDeferred] =
     useState(false);
   const statusRef = useRef(t.statusReady);
-  const setStatus = useCallback((nextStatus: React.SetStateAction<string>) => {
-    const resolvedStatus =
-      typeof nextStatus === "function"
-        ? nextStatus(statusRef.current)
-        : nextStatus;
-    statusRef.current = resolvedStatus;
-    onStatusChange?.(resolvedStatus);
-  }, [onStatusChange]);
+  const setStatus = useCallback(
+    (nextStatus: React.SetStateAction<string>) => {
+      const resolvedStatus =
+        typeof nextStatus === "function"
+          ? nextStatus(statusRef.current)
+          : nextStatus;
+      statusRef.current = resolvedStatus;
+      onStatusChange?.(resolvedStatus);
+    },
+    [onStatusChange],
+  );
   const [fileLoadBusy, setFileLoadBusy] = useState(false);
   const [pendingObjFile, setPendingObjFile] = useState<File | null>(null);
   const [pendingTemplateFile, setPendingTemplateFile] = useState<File | null>(
@@ -1532,8 +1582,10 @@ export default function App({
 
   const [pendingMaxColours, setPendingMaxColours] = useState(128);
   const [appliedMaxColours, setAppliedMaxColours] = useState(128);
-  const [pendingBlendStepPercent, setPendingBlendStepPercent] = useState<BlendStepPercent>(5);
-  const [appliedBlendStepPercent, setAppliedBlendStepPercent] = useState<BlendStepPercent>(5);
+  const [pendingBlendStepPercent, setPendingBlendStepPercent] =
+    useState<BlendStepPercent>(5);
+  const [appliedBlendStepPercent, setAppliedBlendStepPercent] =
+    useState<BlendStepPercent>(5);
   const [pendingAccentProtection, setPendingAccentProtection] =
     useState<AccentProtectionMode>("off");
   const [appliedAccentProtection, setAppliedAccentProtection] =
@@ -1605,6 +1657,7 @@ export default function App({
   const [loadProjectParts, setLoadProjectParts] =
     useState<ProjectPartSelection>(DEFAULT_PROJECT_PART_SELECTION);
   const [exportBusy, setExportBusy] = useState(false);
+  const [orientationBusy, setOrientationBusy] = useState(false);
   const [exportFileName, setExportFileName] = useState("");
   const [exportCoordinateMode, setExportCoordinateMode] =
     useState<ExportCoordinateMode>("auto");
@@ -1726,7 +1779,8 @@ export default function App({
         const bAssigned = bSlot >= 0;
         if (aAssigned && bAssigned) result = aSlot - bSlot;
         else if (aAssigned !== bAssigned) result = aAssigned ? -1 : 1;
-        else result = compareText(a.name, b.name) || compareText(a.type, b.type);
+        else
+          result = compareText(a.name, b.name) || compareText(a.type, b.type);
       } else if (filamentSortKey === "material") {
         result =
           compareText(
@@ -1779,7 +1833,6 @@ export default function App({
     [manualFilamentSlots],
   );
 
-
   const manualSelectionOutsideFilterCount = useMemo(() => {
     if (filamentMaterialFilter === "__all__") return 0;
     return manualFilamentSlots.filter((filament) => {
@@ -1790,6 +1843,10 @@ export default function App({
   }, [filamentMaterialFilter, manualFilamentSlots]);
 
   const previewRef = useRef<ThreePreviewHandle | null>(null);
+  const baseModelRef = useRef<MeshModel | null>(null);
+  const orientationMatrixRef = useRef<OrientationMatrix>([
+    ...IDENTITY_ORIENTATION_MATRIX,
+  ]);
   const waitingForPreviewAfterApplyRef = useRef(false);
   const waitingForPreviewAfterPaletteApplyRef = useRef(false);
   const waitingForThreePreviewProgressRef = useRef(false);
@@ -1975,7 +2032,6 @@ export default function App({
     }, 1800);
   }
 
-  
   function startThreePreviewProgress(): void {
     if (!model) return;
     waitingForThreePreviewProgressRef.current = true;
@@ -2075,6 +2131,14 @@ export default function App({
     ],
     [t],
   );
+  const orientationSteps = useMemo(
+    () => [
+      t.progressOrientationPrepare,
+      t.progressOrientationApply,
+      t.progressOrientationRefresh,
+    ],
+    [t],
+  );
 
   async function handleLoadSelectedInputs(): Promise<void> {
     const hasAnyPendingInput = Boolean(
@@ -2161,6 +2225,9 @@ export default function App({
     setFileLoadBusy(true);
     setStatus(t.loadingFile);
     setModel(null);
+    baseModelRef.current = null;
+    setAppliedModelBottomSide("current");
+    orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
     setLargeModelComputationsDeferred(false);
     setThreePreviewRequested(true);
     setForceThreePreview(false);
@@ -2169,6 +2236,8 @@ export default function App({
     setAssignmentOverrides({});
     setSelectedAssignmentKeys([]);
     await new Promise((resolve) => window.setTimeout(resolve, 40));
+    const fileHeader = await readFileHeaderText(file);
+    const forceKeepCoordinateMode = isPrinterSpaceTextureBakingObjHeader(fileHeader);
     try {
       const parsed = await parseObjFile(file, (progress) => {
         if (progress.totalBytes && progress.loadedBytes !== undefined) {
@@ -2190,11 +2259,21 @@ export default function App({
         "model.obj",
       );
       modelFileRef.current = file;
-      setModel({ ...parsed, name: safeModelName });
+      const loadedModel = { ...parsed, name: safeModelName };
+      baseModelRef.current = loadedModel;
+      orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
+      setModel(modelWithOrientationMatrix(loadedModel, orientationMatrixRef.current));
       // Always derive the export filename from the currently loaded model.
       // This keeps the export target predictable when users switch between OBJ files.
       setExportFileName(exportFileNameForModel(safeModelName));
       exportFileNameUserEditedRef.current = false;
+      if (forceKeepCoordinateMode) {
+        // Texture Baking exports are already written in printer/Z-up
+        // coordinates. Do not let the generic auto heuristic rotate wide,
+        // flat terrain models a second time in the VertexColor preview/export.
+        setExportCoordinateMode("keep");
+        setStatus("Texture Baking OBJ loaded. Coordinate mode: keep.");
+      }
       if (jumpToPhysical) setActiveTab("physical");
     } catch (err) {
       setStatus(
@@ -2283,6 +2362,138 @@ export default function App({
     }
   }
 
+  function modelWithOrientationMatrix(
+    sourceModel: MeshModel,
+    matrix: OrientationMatrix,
+  ): MeshModel {
+    return {
+      ...sourceModel,
+      vertices: sourceModel.vertices.map((vertex) =>
+        applyOrientationMatrixToVec3(vertex, matrix),
+      ),
+    };
+  }
+
+  function setVertexModelOrientationMatrix(
+    matrix: OrientationMatrix,
+    actionLabel = "orientation updated",
+    sourceLabel = "model",
+  ): void {
+    const baseModel = baseModelRef.current;
+    if (!baseModel) return;
+    orientationMatrixRef.current = [...matrix];
+    setModel(modelWithOrientationMatrix(baseModel, matrix));
+    setAppliedModelBottomSide("current");
+    setStatus(`${t.modelOrientation}: ${actionLabel} (${sourceLabel}).`);
+    window.requestAnimationFrame(() => previewRef.current?.fitToModel());
+  }
+
+  async function runVertexOrientationOperation(operation: () => void): Promise<void> {
+    setOrientationBusy(true);
+    showProgress("orientation", t.progressOrientationTitle, orientationSteps, 0);
+    try {
+      await yieldToUi(40);
+      showProgress("orientation", t.progressOrientationTitle, orientationSteps, 1);
+      await yieldToUi(20);
+      operation();
+      showProgress("orientation", t.progressOrientationTitle, orientationSteps, 2);
+      await yieldToUi(20);
+      showProgress(
+        "orientation",
+        t.progressOrientationTitle,
+        orientationSteps,
+        Math.max(0, orientationSteps.length - 1),
+      );
+      clearProgressDelayed();
+    } catch (err) {
+      showProgress(
+        "orientation",
+        t.progressOrientationTitle,
+        orientationSteps,
+        1,
+        err instanceof Error ? err.message : String(err),
+      );
+      setStatus(`${t.modelOrientation}: orientation failed.`);
+      clearProgressDelayed();
+    } finally {
+      setOrientationBusy(false);
+    }
+  }
+
+  async function applyVertexModelRotation(
+    command: ModelRotationCommand,
+    sourceLabel = "model",
+  ): Promise<void> {
+    const rotation = orientationMatrixForQuarterTurn(command, "negZ");
+    const nextMatrix = composeOrientationMatrices(
+      rotation,
+      orientationMatrixRef.current,
+    );
+    const labels: Record<ModelRotationCommand, string> = {
+      left: "rotated left 90°",
+      right: "rotated right 90°",
+      forward: "rotated forward 90°",
+      backward: "rotated backward 90°",
+    };
+    await runVertexOrientationOperation(() =>
+      setVertexModelOrientationMatrix(nextMatrix, labels[command], sourceLabel),
+    );
+  }
+
+  async function applyVertexFineRotation(sourceLabel = "model"): Promise<void> {
+    const angle = Math.round(Math.max(-180, Math.min(180, fineRotationAngle)));
+    if (Math.abs(angle) < 0.000001) return;
+    const rotation = orientationMatrixForAxisAngle(fineRotationAxis, angle);
+    const nextMatrix = composeOrientationMatrices(
+      rotation,
+      orientationMatrixRef.current,
+    );
+    await runVertexOrientationOperation(() =>
+      setVertexModelOrientationMatrix(
+        nextMatrix,
+        `rotated ${angle}° around ${fineRotationAxis.toUpperCase()}`,
+        sourceLabel,
+      ),
+    );
+    setFineRotationAngle(0);
+  }
+
+  function setVertexCurrentOrientation(): void {
+    setAppliedModelBottomSide("current");
+    setFineRotationAngle(0);
+    setStatus(`${t.modelOrientation}: current orientation set.`);
+    window.requestAnimationFrame(() => previewRef.current?.fitToModel());
+  }
+
+  async function resetVertexModelOrientation(sourceLabel = "model"): Promise<void> {
+    setFineRotationAngle(0);
+    setAppliedModelBottomSide("current");
+    await runVertexOrientationOperation(() =>
+      setVertexModelOrientationMatrix(
+        [...IDENTITY_ORIENTATION_MATRIX],
+        "orientation reset to imported state",
+        sourceLabel,
+      ),
+    );
+  }
+
+  function applyVertexModelOrientation(
+    bottomSide: ModelBottomSide,
+    sourceLabel = "model",
+  ): void {
+    if (bottomSide === "current") return;
+    const command = orientationMatrixForBottomSide(bottomSide, "negZ");
+    const nextMatrix = composeOrientationMatrices(
+      command,
+      orientationMatrixRef.current,
+    );
+    setVertexModelOrientationMatrix(
+      nextMatrix,
+      "orientation restored from project",
+      sourceLabel,
+    );
+  }
+
   function buildSettingsObject(): Record<string, unknown> {
     return {
       lang,
@@ -2291,6 +2502,8 @@ export default function App({
       previewMode,
       previewDisplayMode,
       webglLodMode,
+      modelBottomSide: appliedModelBottomSide,
+      modelOrientationMatrix: orientationMatrixRef.current,
       physicalExtruders,
       physicalColourSource,
       presetName,
@@ -2342,7 +2555,6 @@ export default function App({
     };
   }
 
-  
   async function buildProjectExport(): Promise<string> {
     const files: Record<string, EmbeddedProjectFile> = {};
     if (saveProjectParts.model && modelFileRef.current) {
@@ -2514,6 +2726,26 @@ export default function App({
           ? "small"
           : webglLodMode,
     );
+    if (isOrientationMatrix(settings.modelOrientationMatrix)) {
+      const matrix = [...settings.modelOrientationMatrix] as OrientationMatrix;
+      if (baseModelRef.current) {
+        setVertexModelOrientationMatrix(
+          matrix,
+          "orientation restored from project",
+          "project",
+        );
+      } else {
+        orientationMatrixRef.current = matrix;
+        setAppliedModelBottomSide("current");
+      }
+    } else if (isModelBottomSide(settings.modelBottomSide)) {
+      if (baseModelRef.current && settings.modelBottomSide !== "current") {
+        applyVertexModelOrientation(settings.modelBottomSide, "project");
+      } else {
+        setAppliedModelBottomSide("current");
+        orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
+      }
+    }
     const nextPresetName = stringSetting(settings.presetName, presetName);
     const nextManualPhysicalColours = stringSetting(
       settings.manualPhysicalColours,
@@ -3097,7 +3329,6 @@ export default function App({
     }, 80);
   }
 
-  
   function handlePreviewBusyChange(busy: boolean) {
     previewBusyRef.current = busy;
     setPreviewBusy(busy);
@@ -3131,9 +3362,6 @@ export default function App({
     setPreviewBackground(next);
   }
 
-  
-  
-  
   const fixedPhysicalFilaments = useMemo(() => {
     if (physicalColourSource === "preset")
       return filamentsFromPreset(presetName, physicalExtruders, (token) =>
@@ -3309,6 +3537,9 @@ export default function App({
     waitingForThreePreviewProgressRef.current = false;
     setProgressRun(null);
     setModel(null);
+    baseModelRef.current = null;
+    setAppliedModelBottomSide("current");
+    orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
     setLargeModelComputationsDeferred(false);
     setThreePreviewRequested(false);
     setForceThreePreview(false);
@@ -3841,7 +4072,8 @@ export default function App({
     filamentBusy ||
     settingsBusy ||
     suggestionBusy ||
-    exportBusy;
+    exportBusy ||
+    orientationBusy;
   const [settingsWidth, setSettingsWidth] = useState(() => {
     const stored = Number(window.localStorage.getItem("vccm.settingsWidth"));
     return Number.isFinite(stored) && stored >= 480 && stored <= 980
@@ -3881,6 +4113,8 @@ export default function App({
     setSettingsWidth(620);
   }
 
+  const showOrientationAxisGuide = activeTab === "orientation";
+
   const tabs: Array<{
     id: SidebarTab;
     label: string;
@@ -3888,6 +4122,11 @@ export default function App({
     disabled?: boolean;
   }> = [
     { id: "model", label: t.tabLoad, tip: t.stagedLoadIntro },
+    {
+      id: "orientation",
+      label: t.modelOrientation,
+      tip: t.tipModelOrientation,
+    },
     {
       id: "physical",
       label: t.colourSetup,
@@ -4153,6 +4392,115 @@ export default function App({
               </>
             )}
 
+            {activeTab === "orientation" && (
+              <section className="card tab-card workflow-card">
+                <h2>{t.modelOrientation}</h2>
+                <p className="muted workflow-intro">{t.tipModelOrientation}</p>
+                <div className="orientation-panel">
+                  <div className="section-subtitle">{t.rotate90}</div>
+                  <div className="adjustment-actions">
+                    {([
+                      ["left", t.rotateLeft],
+                      ["right", t.rotateRight],
+                      ["forward", t.rotateForward],
+                      ["backward", t.rotateBackward],
+                    ] as Array<[ModelRotationCommand, string]>).map(([command, label]) => (
+                      <button
+                        key={command}
+                        type="button"
+                        className="secondary"
+                        onClick={() => void applyVertexModelRotation(command)}
+                        disabled={!baseModelRef.current || globalBusy}
+                        title={t.tipApplyOrientation}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="section-mini-title">{t.fineRotation}</div>
+                  <div>
+                    <label className="inline-row" title={t.tipFineRotation}>
+                      <HelpLabel title={t.tipFineRotation}>
+                        {t.rotationAxis}
+                      </HelpLabel>
+                      <select
+                        value={fineRotationAxis}
+                        disabled={!baseModelRef.current || globalBusy}
+                        onChange={(e) =>
+                          setFineRotationAxis(e.target.value as ModelRotationAxis)
+                        }
+                      >
+                        <option value="x">X</option>
+                        <option value="y">Y</option>
+                        <option value="z">Z</option>
+                      </select>
+                    </label>
+                    <label className="inline-row" title={t.tipFineRotation}>
+                      <HelpLabel title={t.tipFineRotation}>
+                        {t.rotationAngle}
+                      </HelpLabel>
+                      <input
+                        type="number"
+                        min={-180}
+                        max={180}
+                        step={1}
+                        value={fineRotationAngle}
+                        disabled={!baseModelRef.current || globalBusy}
+                        onChange={(e) =>
+                          setFineRotationAngle(
+                            Math.round(Math.max(-180, Math.min(180, Number(e.target.value) || 0))),
+                          )
+                        }
+                      />
+                    </label>
+                  </div>
+                  <div className="adjustment-actions">
+                    <button
+                      type="button"
+                      onClick={() => void applyVertexFineRotation()}
+                      disabled={
+                        !baseModelRef.current ||
+                        Math.abs(fineRotationAngle) < 0.000001 ||
+                        globalBusy
+                      }
+                      title={t.tipFineRotation}
+                    >
+                      {t.applyFineRotation}
+                    </button>
+                  </div>
+
+                  <div className="adjustment-actions">
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={setVertexCurrentOrientation}
+                      disabled={!baseModelRef.current || globalBusy}
+                      title={t.tipSetCurrentOrientation}
+                    >
+                      {t.setCurrentOrientation}
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => void resetVertexModelOrientation("model")}
+                      disabled={
+                        !baseModelRef.current ||
+                        isIdentityOrientationMatrix(orientationMatrixRef.current) ||
+                        globalBusy
+                      }
+                      title={t.tipResetOrientation}
+                    >
+                      {t.resetImportedOrientation}
+                    </button>
+                  </div>
+                  <div className="muted note">
+                    {t.orientationCurrent}: <b>{t.orientationCurrent}</b>
+                  </div>
+                </div>
+              </section>
+            )}
+
             {activeTab === "palette" && (
               <section className="card tab-card workflow-card">
                 <h2>{t.paletteAndVirtualColours}</h2>
@@ -4243,7 +4591,10 @@ export default function App({
                     </option>
                   </select>
                 </label>
-                <label className="inline-row" title={t.tipVirtualPreviewLightness}>
+                <label
+                  className="inline-row"
+                  title={t.tipVirtualPreviewLightness}
+                >
                   <HelpLabel title={t.tipVirtualPreviewLightness}>
                     {t.virtualPreviewLightness}
                   </HelpLabel>
@@ -4255,11 +4606,15 @@ export default function App({
                       )
                     }
                   >
-                    <option value={-72}>{t.virtualPreviewLightnessDarker}</option>
+                    <option value={-72}>
+                      {t.virtualPreviewLightnessDarker}
+                    </option>
                     <option value={-36}>
                       {t.virtualPreviewLightnessSlightlyDarker}
                     </option>
-                    <option value={0}>{t.virtualPreviewLightnessCalibrated}</option>
+                    <option value={0}>
+                      {t.virtualPreviewLightnessCalibrated}
+                    </option>
                     <option value={12}>
                       {t.virtualPreviewLightnessSlightlyBrighter}
                     </option>
@@ -4738,7 +5093,7 @@ export default function App({
                   value={pendingAdjustments.gamma}
                   min={0.1}
                   max={3}
-                  step={0.1}
+                  step={1}
                   onChange={(v) =>
                     updatePendingAdjustment("gamma", Number(v.toFixed(1)))
                   }
@@ -6094,7 +6449,8 @@ export default function App({
                     background={resolvedPreviewBackground}
                     displayMode={previewDisplayMode}
                     wireframe={wireframe}
-                    showAxes={showAxes}
+                    showAxes={showAxes || showOrientationAxisGuide}
+                    showAxisLabels={showOrientationAxisGuide}
                     lodMode={webglLodMode}
                     maxPreviewTriangles={MAX_WEBGL_PREVIEW_TRIANGLES}
                     onBusyChange={handlePreviewBusyChange}

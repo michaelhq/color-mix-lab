@@ -33,11 +33,19 @@ import { downloadBlob } from "./core/zipDownload";
 import { extractSupportedModelFilesFromZip } from "./core/readZip";
 import ModelPreview, { type CameraSyncState } from "./ui/ModelPreview";
 import {
-  bottomSideRotation,
+  composeOrientationMatrices,
+  IDENTITY_ORIENTATION_MATRIX,
+  applyOrientationMatrixToVec3,
+  isIdentityOrientationMatrix,
   isModelBottomSide,
-  MODEL_BOTTOM_SIDE_OPTIONS,
-  modelBottomSideLabel,
+  isOrientationMatrix,
+  orientationMatrixForAxisAngle,
+  orientationMatrixForBottomSide,
+  orientationMatrixForQuarterTurn,
   type ModelBottomSide,
+  type ModelRotationAxis,
+  type ModelRotationCommand,
+  type OrientationMatrix,
 } from "../common/modelOrientation";
 
 type UiLanguage = "en";
@@ -127,6 +135,10 @@ type TranslationKey =
   | "progressLoadTitle"
   | "progressBakeTitle"
   | "progressExportTitle"
+  | "progressOrientationTitle"
+  | "progressOrientationPrepare"
+  | "progressOrientationApply"
+  | "progressOrientationRefresh"
   | "progressReadFiles"
   | "progressSearchZip"
   | "progressExtractZip"
@@ -194,10 +206,20 @@ type TranslationKey =
   | "resetBakeColourCorrectionTip"
   | "modelOrientation"
   | "modelOrientationTip"
-  | "bottomSide"
-  | "applyOrientation"
+  | "rotate90"
+  | "rotateLeft"
+  | "rotateRight"
+  | "rotateForward"
+  | "rotateBackward"
+  | "fineRotation"
+  | "rotationAxis"
+  | "rotationAngle"
+  | "applyFineRotation"
+  | "setCurrentOrientation"
+  | "resetImportedOrientation"
   | "applyOrientationTip"
-  | "resetOrientation"
+  | "fineRotationTip"
+  | "setCurrentOrientationTip"
   | "resetOrientationTip"
   | "orientationCurrent"
   | "saveTextureProjectTip"
@@ -258,7 +280,7 @@ const I18N: Record<UiLanguage, Record<TranslationKey, string>> = {
       "Controls triangle budget, subdivision depth, and error thresholds. Higher levels preserve fine texture patterns better but use much more memory and time.",
     triangleBudget: "Triangle budget",
     triangleBudgetTip:
-      "Upper limit for generated triangles. The budget is not always fully used.",
+      "Upper limit for generated triangles. The budget is not always fully used. If the input mesh already exceeds this limit, the app warns you; reduce the model externally before import if needed.",
     maxDepth: "Max. subdivision depth",
     maxDepthTip: "Limits how often a triangle may be recursively split.",
     exportScale: "Export scale",
@@ -313,6 +335,10 @@ const I18N: Record<UiLanguage, Record<TranslationKey, string>> = {
     progressLoadTitle: "Load model",
     progressBakeTitle: "Texture baking",
     progressExportTitle: "Export baked vertex OBJ",
+    progressOrientationTitle: "Orient model",
+    progressOrientationPrepare: "Prepare orientation transform",
+    progressOrientationApply: "Apply geometry orientation",
+    progressOrientationRefresh: "Refresh preview",
     progressReadFiles: "Read files",
     progressSearchZip: "Search ZIP contents",
     progressExtractZip: "Extract model and texture files",
@@ -392,12 +418,24 @@ const I18N: Record<UiLanguage, Record<TranslationKey, string>> = {
       "Resets bake colour correction to neutral values and clears the current baked result.",
     modelOrientation: "Model orientation",
     modelOrientationTip:
-      "Rotates the loaded model geometry in 90° steps so the selected model side faces the build plate. UVs and colours are kept; bake results are cleared because geometry changed.",
-    bottomSide: "Bottom side",
-    applyOrientation: "Apply orientation",
+      "Rotates the loaded model geometry. Use 90° rotations for coarse axis orientation and fine rotation for small angle corrections. UVs and colours are kept; bake results are cleared because geometry changed.",
+    rotate90: "Rotate 90°",
+    rotateLeft: "Rotate left",
+    rotateRight: "Rotate right",
+    rotateForward: "Rotate forward",
+    rotateBackward: "Rotate backward",
+    fineRotation: "Fine rotation",
+    rotationAxis: "Axis",
+    rotationAngle: "Angle",
+    applyFineRotation: "Apply fine rotation",
+    setCurrentOrientation: "Set current orientation",
+    resetImportedOrientation: "Reset to imported orientation",
     applyOrientationTip:
-      "Applies the selected orientation to the model geometry used for preview, diagnostics, baking, OBJ export and handoff.",
-    resetOrientation: "Reset orientation",
+      "Applies this 90° rotation to the current model orientation used for preview, diagnostics, baking, OBJ export and handoff.",
+    fineRotationTip:
+      "Applies the selected degree rotation around the chosen model axis. Use small values for fine alignment corrections.",
+    setCurrentOrientationTip:
+      "Keeps the current model orientation as the active working orientation and clears the pending fine-rotation value.",
     resetOrientationTip:
       "Restores the loaded model to its original imported orientation and clears the current bake result.",
     orientationCurrent: "Current",
@@ -649,6 +687,50 @@ function textureChecksStatus(report: TextureBakeReport | null): string {
 }
 
 type HealthSeverity = "ok" | "warning" | "error" | "neutral";
+
+
+function transformDiagnosticsBoundingBox(
+  diagnostics: MeshDiagnostics | null,
+  matrix: OrientationMatrix,
+): MeshDiagnostics | null {
+  if (!diagnostics?.boundingBox) return diagnostics;
+  const { min, max } = diagnostics.boundingBox;
+  const sourceCorners: Array<[number, number, number]> = [
+    [min[0], min[1], min[2]],
+    [min[0], min[1], max[2]],
+    [min[0], max[1], min[2]],
+    [min[0], max[1], max[2]],
+    [max[0], min[1], min[2]],
+    [max[0], min[1], max[2]],
+    [max[0], max[1], min[2]],
+    [max[0], max[1], max[2]],
+  ];
+  const corners: Array<[number, number, number]> = sourceCorners.map((corner) =>
+    applyOrientationMatrixToVec3(corner, matrix),
+  );
+  const nextMin: [number, number, number] = [Infinity, Infinity, Infinity];
+  const nextMax: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  corners.forEach((corner) => {
+    for (let axis = 0; axis < 3; axis += 1) {
+      nextMin[axis] = Math.min(nextMin[axis], corner[axis]);
+      nextMax[axis] = Math.max(nextMax[axis], corner[axis]);
+    }
+  });
+  const size: [number, number, number] = [
+    nextMax[0] - nextMin[0],
+    nextMax[1] - nextMin[1],
+    nextMax[2] - nextMin[2],
+  ];
+  return {
+    ...diagnostics,
+    boundingBox: {
+      min: nextMin,
+      max: nextMax,
+      size,
+      diagonal: Math.hypot(size[0], size[1], size[2]),
+    },
+  };
+}
 
 function formatCombinedTextureStatus(
   prefix: string,
@@ -1385,6 +1467,10 @@ export default function App({
   const textureProjectInputRef = useRef<HTMLInputElement | null>(null);
   const lastFilesRef = useRef<File[] | null>(null);
   const baseSceneRef = useRef<THREE.Object3D | null>(null);
+  const baseDiagnosticsRef = useRef<MeshDiagnostics | null>(null);
+  const orientationMatrixRef = useRef<OrientationMatrix>([
+    ...IDENTITY_ORIENTATION_MATRIX,
+  ]);
   const language: UiLanguage = "en";
   const t = useCallback(
     (key: TranslationKey) => I18N[language][key],
@@ -1427,10 +1513,11 @@ export default function App({
   const [bakedScene, setBakedScene] = useState<THREE.Object3D | null>(null);
   const [diagnostics, setDiagnostics] = useState<MeshDiagnostics | null>(null);
   const [bakeReport, setBakeReport] = useState<TextureBakeReport | null>(null);
-  const [pendingModelBottomSide, setPendingModelBottomSide] =
-    useState<ModelBottomSide>("current");
   const [appliedModelBottomSide, setAppliedModelBottomSide] =
     useState<ModelBottomSide>("current");
+  const [fineRotationAxis, setFineRotationAxis] =
+    useState<ModelRotationAxis>("z");
+  const [fineRotationAngle, setFineRotationAngle] = useState(0);
   const [fileInfo, setFileInfo] = useState<{
     name: string;
     size: number;
@@ -1440,6 +1527,7 @@ export default function App({
   const [busy, setBusy] = useState(false);
   const [bakeBusy, setBakeBusy] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
+  const [orientationBusy, setOrientationBusy] = useState(false);
   const [exportScale, setExportScale] = useState(1000);
   const [error, setError] = useState<string | null>(null);
   const [bakeError, setBakeError] = useState<string | null>(null);
@@ -1482,36 +1570,46 @@ export default function App({
     notifyStatus,
   ]);
 
-  function sceneWithModelBottomSide(
+  function sceneWithOrientationMatrix(
     baseScene: THREE.Object3D,
+    matrix: OrientationMatrix,
     bottomSide: ModelBottomSide,
   ): THREE.Object3D {
     const clonedSource = baseScene.clone(true);
     const wrapper = new THREE.Group();
     wrapper.name = baseScene.name;
-    wrapper.userData = { ...baseScene.userData, modelBottomSide: bottomSide };
+    wrapper.userData = {
+      ...baseScene.userData,
+      modelBottomSide: bottomSide,
+      modelOrientationMatrix: matrix,
+    };
     wrapper.add(clonedSource);
-    const rotation = bottomSideRotation(bottomSide);
-    wrapper.rotation.set(rotation.x, rotation.y, rotation.z);
+    const transform = new THREE.Matrix4().set(
+      matrix[0], matrix[1], matrix[2], 0,
+      matrix[3], matrix[4], matrix[5], 0,
+      matrix[6], matrix[7], matrix[8], 0,
+      0, 0, 0, 1,
+    );
+    wrapper.applyMatrix4(transform);
     wrapper.updateMatrixWorld(true);
     return wrapper;
   }
 
-  function applyTextureModelOrientation(
-    bottomSide: ModelBottomSide,
+  function setTextureModelOrientationMatrix(
+    matrix: OrientationMatrix,
+    actionLabel = "orientation updated",
     sourceLabel = "model",
   ): MeshDiagnostics | null {
     const baseScene = baseSceneRef.current;
     if (!baseScene) return null;
-    const orientedScene = sceneWithModelBottomSide(baseScene, bottomSide);
-    const report = analyzeScene(
-      orientedScene,
-      fileInfo?.name ?? baseScene.name ?? "model",
-    );
+    orientationMatrixRef.current = [...matrix];
+    const orientedScene = sceneWithOrientationMatrix(baseScene, matrix, "current");
+    const report =
+      transformDiagnosticsBoundingBox(baseDiagnosticsRef.current, matrix) ??
+      analyzeScene(orientedScene, fileInfo?.name ?? baseScene.name ?? "model");
     setScene(orientedScene);
     setDiagnostics(report);
-    setPendingModelBottomSide(bottomSide);
-    setAppliedModelBottomSide(bottomSide);
+    setAppliedModelBottomSide("current");
     setBakedScene(null);
     setBakeReport(null);
     setBakeError(null);
@@ -1519,12 +1617,128 @@ export default function App({
     setPreviewFitSignal((value) => value + 1);
     notifyStatus(
       formatCombinedTextureStatus(
-        `Texture Baking: ${sourceLabel} orientation set to ${modelBottomSideLabel(bottomSide)}.`,
+        `Texture Baking: ${sourceLabel} ${actionLabel}.`,
         report,
         null,
       ),
     );
     return report;
+  }
+
+  async function runTextureOrientationOperation(
+    operation: () => MeshDiagnostics | null,
+  ): Promise<MeshDiagnostics | null> {
+    const steps = [
+      t("progressOrientationPrepare"),
+      t("progressOrientationApply"),
+      t("progressOrientationRefresh"),
+    ];
+    setOrientationBusy(true);
+    setProgress({ title: t("progressOrientationTitle"), steps, activeIndex: 0 });
+    try {
+      await waitForPaint(40);
+      setProgress({ title: t("progressOrientationTitle"), steps, activeIndex: 1 });
+      await waitForPaint(20);
+      const report = operation();
+      setProgress({ title: t("progressOrientationTitle"), steps, activeIndex: 2 });
+      await waitForPaint(20);
+      setProgress({
+        title: t("progressOrientationTitle"),
+        steps,
+        activeIndex: steps.length - 1,
+        done: true,
+      });
+      window.setTimeout(() => setProgress(null), 450);
+      return report;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setProgress({
+        title: t("progressOrientationTitle"),
+        steps,
+        activeIndex: 1,
+        error: message,
+      });
+      notifyStatus("Texture Baking: orientation failed. Details in Model orientation.");
+      window.setTimeout(() => setProgress(null), 1200);
+      return null;
+    } finally {
+      setOrientationBusy(false);
+    }
+  }
+
+  async function applyTextureModelRotation(
+    command: ModelRotationCommand,
+    sourceLabel = "model",
+  ): Promise<MeshDiagnostics | null> {
+    const rotation = orientationMatrixForQuarterTurn(command, "negY");
+    const nextMatrix = composeOrientationMatrices(
+      rotation,
+      orientationMatrixRef.current,
+    );
+    const labels: Record<ModelRotationCommand, string> = {
+      left: "rotated left 90°",
+      right: "rotated right 90°",
+      forward: "rotated forward 90°",
+      backward: "rotated backward 90°",
+    };
+    return runTextureOrientationOperation(() =>
+      setTextureModelOrientationMatrix(nextMatrix, labels[command], sourceLabel),
+    );
+  }
+
+  async function applyTextureFineRotation(sourceLabel = "model"): Promise<MeshDiagnostics | null> {
+    const angle = Math.round(Math.max(-180, Math.min(180, fineRotationAngle)));
+    if (Math.abs(angle) < 0.000001) return null;
+    const rotation = orientationMatrixForAxisAngle(fineRotationAxis, angle);
+    const nextMatrix = composeOrientationMatrices(
+      rotation,
+      orientationMatrixRef.current,
+    );
+    const report = await runTextureOrientationOperation(() =>
+      setTextureModelOrientationMatrix(
+        nextMatrix,
+        `rotated ${angle}° around ${fineRotationAxis.toUpperCase()}`,
+        sourceLabel,
+      ),
+    );
+    setFineRotationAngle(0);
+    return report;
+  }
+
+  function setTextureCurrentOrientation(): void {
+    setAppliedModelBottomSide("current");
+    setFineRotationAngle(0);
+    notifyStatus("Texture Baking: current orientation set.");
+    setPreviewFitSignal((value) => value + 1);
+  }
+
+  async function resetTextureModelOrientation(sourceLabel = "model"): Promise<MeshDiagnostics | null> {
+    setFineRotationAngle(0);
+    setAppliedModelBottomSide("current");
+    return runTextureOrientationOperation(() =>
+      setTextureModelOrientationMatrix(
+        [...IDENTITY_ORIENTATION_MATRIX],
+        "orientation reset to imported state",
+        sourceLabel,
+      ),
+    );
+  }
+
+  function applyTextureModelOrientation(
+    bottomSide: ModelBottomSide,
+    sourceLabel = "model",
+  ): MeshDiagnostics | null {
+    if (bottomSide === "current") return null;
+    const command = orientationMatrixForBottomSide(bottomSide, "negY");
+    const nextMatrix = composeOrientationMatrices(
+      command,
+      orientationMatrixRef.current,
+    );
+    return setTextureModelOrientationMatrix(
+      nextMatrix,
+      "orientation restored from project",
+      sourceLabel,
+    );
   }
 
   const loadFiles = useCallback(
@@ -1574,8 +1788,14 @@ export default function App({
         });
         await waitForPaint(20);
         baseSceneRef.current = parsed.scene;
-        const orientedScene = sceneWithModelBottomSide(parsed.scene, "current");
+        orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
+        const orientedScene = sceneWithOrientationMatrix(
+          parsed.scene,
+          orientationMatrixRef.current,
+          "current",
+        );
         const report = analyzeScene(orientedScene, parsed.mainFile.name);
+        baseDiagnosticsRef.current = report;
         setProgress({
           title: t("progressLoadTitle"),
           steps,
@@ -1583,8 +1803,8 @@ export default function App({
         });
         setScene(orientedScene);
         setDiagnostics(report);
-        setPendingModelBottomSide("current");
         setAppliedModelBottomSide("current");
+        orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
         setFileInfo({
           name: parsed.mainFile.name,
           size: files.reduce((sum, file) => sum + file.size, 0),
@@ -1610,6 +1830,7 @@ export default function App({
         const message =
           err instanceof Error ? err.message : "File could not be loaded.";
         baseSceneRef.current = null;
+        baseDiagnosticsRef.current = null;
         setScene(null);
         setBakedScene(null);
         setDiagnostics(null);
@@ -1660,6 +1881,7 @@ export default function App({
       showAxes,
       syncPreviews,
       modelBottomSide: appliedModelBottomSide,
+      modelOrientationMatrix: orientationMatrixRef.current,
     };
   }
 
@@ -1763,12 +1985,24 @@ export default function App({
     if (typeof settings.showAxes === "boolean") setShowAxes(settings.showAxes);
     if (typeof settings.syncPreviews === "boolean")
       setSyncPreviews(settings.syncPreviews);
-    if (isModelBottomSide(settings.modelBottomSide)) {
-      if (baseSceneRef.current)
+    if (isOrientationMatrix(settings.modelOrientationMatrix)) {
+      const matrix = [...settings.modelOrientationMatrix] as OrientationMatrix;
+      if (baseSceneRef.current) {
+        setTextureModelOrientationMatrix(
+          matrix,
+          "orientation restored from project",
+          "project",
+        );
+      } else {
+        orientationMatrixRef.current = matrix;
+        setAppliedModelBottomSide("current");
+      }
+    } else if (isModelBottomSide(settings.modelBottomSide)) {
+      if (baseSceneRef.current && settings.modelBottomSide !== "current")
         applyTextureModelOrientation(settings.modelBottomSide, "project");
       else {
-        setPendingModelBottomSide(settings.modelBottomSide);
-        setAppliedModelBottomSide(settings.modelBottomSide);
+        setAppliedModelBottomSide("current");
+        orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
       }
     }
   }
@@ -2018,6 +2252,7 @@ export default function App({
   const clearModel = () => {
     lastFilesRef.current = null;
     baseSceneRef.current = null;
+    baseDiagnosticsRef.current = null;
     setScene(null);
     setBakedScene(null);
     setDiagnostics(null);
@@ -2026,7 +2261,6 @@ export default function App({
     setError(null);
     setBakeError(null);
     setCameraSyncState(null);
-    setPendingModelBottomSide("current");
     setAppliedModelBottomSide("current");
     notifyStatus("Texture Baking: model cleared.");
   };
@@ -2393,66 +2627,118 @@ export default function App({
               <h2>{t("modelOrientation")}</h2>
               <p className="workflow-intro">{t("modelOrientationTip")}</p>
               <div className="orientation-panel">
-                <label className="inline-row" title={t("modelOrientationTip")}>
-                  <InfoLabel tip={t("modelOrientationTip")}>
-                    {t("bottomSide")}
-                  </InfoLabel>
-                  <select
-                    value={pendingModelBottomSide}
-                    disabled={
-                      !baseSceneRef.current || busy || bakeBusy || exportBusy
-                    }
-                    onChange={(event) =>
-                      setPendingModelBottomSide(
-                        event.currentTarget.value as ModelBottomSide,
-                      )
-                    }
-                  >
-                    {MODEL_BOTTOM_SIDE_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                <div className="section-subtitle">{t("rotate90")}</div>
+                <div className="button-row">
+                  {([
+                    ["left", t("rotateLeft")],
+                    ["right", t("rotateRight")],
+                    ["forward", t("rotateForward")],
+                    ["backward", t("rotateBackward")],
+                  ] as Array<[ModelRotationCommand, string]>).map(([command, label]) => (
+                    <button
+                      key={command}
+                      type="button"
+                      className="secondary"
+                      onClick={() => void applyTextureModelRotation(command)}
+                      disabled={!baseSceneRef.current || busy || bakeBusy || exportBusy || orientationBusy}
+                      title={t("applyOrientationTip")}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="section-mini-title">{t("fineRotation")}</div>
+                <div>
+                  <label className="inline-row" title={t("fineRotationTip")}>
+                    <InfoLabel tip={t("fineRotationTip")}>
+                      {t("rotationAxis")}
+                    </InfoLabel>
+                    <select
+                      value={fineRotationAxis}
+                      disabled={!baseSceneRef.current || busy || bakeBusy || exportBusy || orientationBusy}
+                      onChange={(event) =>
+                        setFineRotationAxis(
+                          event.currentTarget.value as ModelRotationAxis,
+                        )
+                      }
+                    >
+                      <option value="x">X</option>
+                      <option value="y">Y</option>
+                      <option value="z">Z</option>
+                    </select>
+                  </label>
+                  <label className="inline-row" title={t("fineRotationTip")}>
+                    <InfoLabel tip={t("fineRotationTip")}>
+                      {t("rotationAngle")}
+                    </InfoLabel>
+                    <input
+                      type="number"
+                      min={-180}
+                      max={180}
+                      step={1}
+                      value={fineRotationAngle}
+                      disabled={!baseSceneRef.current || busy || bakeBusy || exportBusy || orientationBusy}
+                      onChange={(event) =>
+                        setFineRotationAngle(
+                          Math.round(
+                            Math.max(
+                              -180,
+                              Math.min(180, Number(event.currentTarget.value) || 0),
+                            ),
+                          ),
+                        )
+                      }
+                    />
+                  </label>
+                </div>
                 <div className="button-row">
                   <button
                     type="button"
-                    onClick={() =>
-                      applyTextureModelOrientation(pendingModelBottomSide)
-                    }
+                    onClick={() => void applyTextureFineRotation()}
                     disabled={
                       !baseSceneRef.current ||
-                      pendingModelBottomSide === appliedModelBottomSide ||
+                      Math.abs(fineRotationAngle) < 0.000001 ||
                       busy ||
                       bakeBusy ||
-                      exportBusy
+                      exportBusy ||
+                      orientationBusy
                     }
-                    title={t("applyOrientationTip")}
+                    title={t("fineRotationTip")}
                   >
-                    {t("applyOrientation")}
+                    {t("applyFineRotation")}
+                  </button>
+                </div>
+
+                <div className="button-row">
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={setTextureCurrentOrientation}
+                    disabled={!baseSceneRef.current || busy || bakeBusy || exportBusy || orientationBusy}
+                    title={t("setCurrentOrientationTip")}
+                  >
+                    {t("setCurrentOrientation")}
                   </button>
                   <button
                     type="button"
                     className="secondary"
-                    onClick={() =>
-                      applyTextureModelOrientation("current", "model")
-                    }
+                    onClick={() => void resetTextureModelOrientation("model")}
                     disabled={
                       !baseSceneRef.current ||
-                      appliedModelBottomSide === "current" ||
+                      isIdentityOrientationMatrix(orientationMatrixRef.current) ||
                       busy ||
                       bakeBusy ||
-                      exportBusy
+                      exportBusy ||
+                      orientationBusy
                     }
                     title={t("resetOrientationTip")}
                   >
-                    {t("resetOrientation")}
+                    {t("resetImportedOrientation")}
                   </button>
                 </div>
                 <div className="muted note">
-                  {t("bottomSide")}:{" "}
-                  <b>{modelBottomSideLabel(appliedModelBottomSide)}</b>
+                  {t("orientationCurrent")}: <b>{t("orientationCurrent")}</b>
                 </div>
               </div>
             </div>
@@ -2910,11 +3196,19 @@ export default function App({
                 </p>
               </details>
 
+              {diagnostics && diagnostics.triangleCount > triangleBudget && (
+                <ul className="warning-list compact">
+                  <li>
+                    Input mesh exceeds the selected triangle budget: {formatNumber(diagnostics.triangleCount)} → target {formatNumber(triangleBudget)}. Consider reducing the model externally before baking.
+                  </li>
+                </ul>
+              )}
+
               <div className="texture-action-grid">
                 <button
                   type="button"
                   onClick={runTextureBake}
-                  disabled={!scene || busy || bakeBusy || exportBusy}
+                  disabled={!scene || busy || bakeBusy || exportBusy || orientationBusy}
                   title={t("runBakeTip")}
                 >
                   {bakeBusy ? t("baking") : t("runBake")}
@@ -3400,7 +3694,7 @@ export default function App({
                     type="button"
                     className="secondary"
                     onClick={() => void handleSaveTextureProject()}
-                    disabled={busy || bakeBusy || exportBusy}
+                    disabled={busy || bakeBusy || exportBusy || orientationBusy}
                     title={t("saveTextureProjectTip")}
                   >
                     Save project
@@ -3409,7 +3703,7 @@ export default function App({
                     type="button"
                     className="primary-action"
                     onClick={() => textureProjectInputRef.current?.click()}
-                    disabled={busy || bakeBusy || exportBusy}
+                    disabled={busy || bakeBusy || exportBusy || orientationBusy}
                     title={t("loadTextureProjectTip")}
                   >
                     Load project
@@ -3452,9 +3746,10 @@ export default function App({
                       value={previewView}
                       disabled={!hasAnyPreviewModel}
                       onChange={(event) => {
-                        setPreviewView(
-                          event.currentTarget.value as TexturePreviewView,
-                        );
+                        const nextView = event.currentTarget
+                          .value as TexturePreviewView;
+                        setCameraSyncState(null);
+                        setPreviewView(nextView);
                         setPreviewResetSignal((value) => value + 1);
                       }}
                     >

@@ -768,7 +768,37 @@ export default function ModelPreview({
       renderer.dispose();
       renderer.domElement.remove();
     };
-  }, [scene, view, darkMode, syncId, colourCorrection]);
+  }, [scene, darkMode, syncId, colourCorrection]);
+
+  useEffect(() => {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    const root = modelRootRef.current;
+    if (!camera || !controls || !root) return undefined;
+
+    const applyView = () => {
+      const currentCamera = cameraRef.current;
+      const currentControls = controlsRef.current;
+      const currentRoot = modelRootRef.current;
+      if (!currentCamera || !currentControls || !currentRoot) return;
+      fitCamera(currentCamera, currentControls, currentRoot, view);
+      lastViewRef.current = view;
+      if (
+        syncEnabledRef.current &&
+        onSyncChangeRef.current &&
+        !applyingExternalSyncRef.current
+      ) {
+        onSyncChangeRef.current(
+          buildCameraSyncState(syncId, currentCamera, currentControls),
+        );
+      }
+    };
+
+    applyView();
+    const frame = window.requestAnimationFrame(applyView);
+    return () => window.cancelAnimationFrame(frame);
+  }, [view, syncId]);
+
 
   useEffect(() => {
     if (fitSignal === lastFitSignalRef.current) return;
