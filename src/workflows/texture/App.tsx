@@ -2420,10 +2420,7 @@ export default function App({
       diagnostics.trianglesWithoutUV
     : 0;
   const meshWarningCount = diagnostics
-    ? diagnostics.thinTriangles +
-      diagnostics.duplicateFaces +
-      diagnostics.trianglesWithUVOutside01 +
-      diagnostics.skinnedMeshCount
+    ? diagnostics.warnings.length + (bakeReport?.warnings.length ?? 0)
     : 0;
   const bakeIssueCount = bakeReport
     ? bakeReport.bakedOpenEdges +
@@ -3436,21 +3433,6 @@ export default function App({
               ) : (
                 <>
                   <div className="diagnostic-summary">
-                    <span
-                      className={
-                        meshIssueCount + bakeIssueCount > 0
-                          ? "badge bad"
-                          : meshWarningCount > 0
-                            ? "badge warn"
-                            : "badge ok"
-                      }
-                    >
-                      {meshIssueCount + bakeIssueCount > 0
-                        ? t("issuesDetected")
-                        : meshWarningCount > 0
-                          ? t("warningsDetected")
-                          : t("noWarnings")}
-                    </span>
                     <span className="muted">
                       Meshes {formatNumber(diagnostics.meshCount)} · triangles{" "}
                       {formatNumber(diagnostics.triangleCount)} · open edges{" "}
