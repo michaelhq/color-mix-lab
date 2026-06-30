@@ -4,6 +4,7 @@ import type {
   PhysicalSlot,
   RGB,
   VirtualMixPriorityMode,
+  MappingStrategyMode,
 } from "./types";
 import { clamp255, rgbToHex, squaredDistance } from "./colour";
 import {
@@ -51,9 +52,19 @@ export interface PhysicalOnlyEntry {
   linearRgbError: number;
 }
 
+export interface VirtualMappingDiagnostics {
+  targetPaletteCount: number;
+  averageError: number;
+  worstError: number;
+  poorMatchCount: number;
+  poorMatchThreshold: number;
+  collapsedTargetColours: number;
+}
+
 export interface VirtualExtruderPlan {
   virtualBlends: VirtualBlendEntry[];
   physicalOnly: PhysicalOnlyEntry[];
+  mappingDiagnostics: VirtualMappingDiagnostics;
   paletteToAssignment: Map<
     number,
     | { kind: "physical"; extruder: number }
@@ -68,6 +79,7 @@ export interface VirtualExtruderPlanOptions {
   ratioStepPercent: number;
   accentProtection: AccentProtectionMode;
   mixPriority: VirtualMixPriorityMode;
+  mappingStrategy: MappingStrategyMode;
   /**
    * LAB L* offset for the preview colour model. The exported layer sequence is
    * kept independent from display calibration so slicer output remains stable.
@@ -75,14 +87,16 @@ export interface VirtualExtruderPlanOptions {
   previewLightnessOffset: number;
 }
 
-// Virtual mixtures are generated as discrete layer sequences. The UI exposes
-// coarse mixing steps; internally all supported steps are represented on a
-// 2.5%-unit grid so exported layer-sequence semantics remain stable for
-// visible UI values such as 2.5%, 5%, 10%, 20%, and 25%.
-const BLEND_PERCENT_UNIT = 2.5;
+// Virtual mixtures are generated as discrete layer-sequence recipes. The UI
+// exposes a recipe resolution, but PrusaSlicer-compatible recipes use 5%
+// percentage steps. The only non-5% special case is the equal three-colour
+// 1:1:1 recipe, displayed as 33/33/33 while the printable sequence keeps the
+// exact integer counts.
+const BLEND_PERCENT_UNIT = 5;
 const BLEND_TOTAL_UNITS = Math.round(100 / BLEND_PERCENT_UNIT);
 const BLEND_WEIGHT_RESOLUTION = 64;
 const BLEND_QUANTISE_MAX_ERROR = 0.03;
+const POOR_MAPPING_DELTA_E = 18;
 
 function gcd(a: number, b: number): number {
   a = Math.abs(Math.round(a));
@@ -254,16 +268,29 @@ function stepPercentToUnits(ratioStepPercent: number): number {
   return Math.max(1, Math.round(safeStep / BLEND_PERCENT_UNIT));
 }
 
+function reducedCountKey(counts: number[]): string {
+  const g = gcdAll(counts);
+  return counts.map((count) => Math.round(count / g)).join(":");
+}
+
 function buildUnitCountCompositions(
   parts: number,
   totalUnits: number,
   stepUnits: number,
 ): number[][] {
-  if (parts <= 1) return [[totalUnits]];
+  if (parts <= 1) return [[1]];
 
   const minUnits = Math.max(1, stepUnits);
   const allowedOffGridComponents = totalUnits % stepUnits === 0 ? 0 : 1;
   const out: number[][] = [];
+  const seen = new Set<string>();
+  const addCounts = (counts: number[]) => {
+    if (counts.length !== parts || counts.some((count) => count <= 0)) return;
+    const key = reducedCountKey(counts);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(counts);
+  };
 
   const rec = (
     remainingParts: number,
@@ -274,7 +301,7 @@ function buildUnitCountCompositions(
       if (remainingUnits < minUnits) return;
       const counts = [...current, remainingUnits];
       const offGrid = counts.filter((count) => count % stepUnits !== 0).length;
-      if (offGrid <= allowedOffGridComponents) out.push(counts);
+      if (offGrid <= allowedOffGridComponents) addCounts(counts);
       return;
     }
 
@@ -285,6 +312,15 @@ function buildUnitCountCompositions(
   };
 
   rec(parts, totalUnits, []);
+
+  // Equal thirds are the only non-5% Prusa-compatible special case. Keep them
+  // as integer counts so the layer sequence remains exactly 1:1:1 while the UI
+  // displays 33/33/33. Two-colour thirds are deliberately not generated; use
+  // the nearest 5% recipes such as 35/65 or 65/35 instead.
+  if (parts === 3) {
+    addCounts([1, 1, 1]);
+  }
+
   return out;
 }
 
@@ -304,7 +340,11 @@ function makeBlendCandidates(
     const countSets = buildUnitCountCompositions(size, totalUnits, stepUnits);
     for (const subset of combinations(candidates, size)) {
       for (const unitCounts of countSets) {
-        const ratios = unitCounts.map((count) => count / totalUnits);
+        const totalCount = Math.max(
+          1,
+          unitCounts.reduce((sum, count) => sum + count, 0),
+        );
+        const ratios = unitCounts.map((count) => count / totalCount);
         const active: SnappedActiveRatio[] = subset.map((slot, index) => ({
           slot,
           ratio: ratios[index],
@@ -348,6 +388,8 @@ function candidateScore(
   candidate: BlendCandidate,
   accentProtection: AccentProtectionMode,
   mixPriority: VirtualMixPriorityMode,
+  mappingStrategy: MappingStrategyMode,
+  targetWeightShare: number,
   previewLightnessOffset: number,
 ): number {
   // Preview brightness must be monotonic and must not make a brighter
@@ -387,6 +429,24 @@ function candidateScore(
     if (rgbChroma < colourChroma(targetRgb) * 0.45) score += 2.5;
   }
 
+  if (mappingStrategy === "preserve-hue" && targetChroma >= 10) {
+    if (hueGap > 14) score += (hueGap - 14) * 0.32;
+    if (candidateChroma < targetChroma * 0.36)
+      score += (targetChroma * 0.36 - candidateChroma) * 0.18;
+  } else if (mappingStrategy === "preserve-accent" && targetChroma >= 12) {
+    const smallRegion = targetWeightShare > 0 && targetWeightShare <= 0.025;
+    const hueLimit = smallRegion ? 10 : 18;
+    if (hueGap > hueLimit) score += (hueGap - hueLimit) * (smallRegion ? 0.42 : 0.24);
+    const minimumChroma = targetChroma * (smallRegion ? 0.55 : 0.42);
+    if (candidateChroma < minimumChroma)
+      score += (minimumChroma - candidateChroma) * (smallRegion ? 0.24 : 0.14);
+  } else if (mappingStrategy === "smooth" && targetChroma >= 4) {
+    // Smooth mode avoids visibly harsh printable jumps by mildly preferring
+    // less over-saturated candidates when several matches are otherwise close.
+    if (candidateChroma > targetChroma * 1.35)
+      score += (candidateChroma - targetChroma * 1.35) * 0.08;
+  }
+
   const tinyComponentPenalty = candidate.ratios.filter((r) => r > 0 && r < 0.08).length * 0.08;
   const componentPenalty = (candidate.subset.length - 1) * 0.04;
   return score + tinyComponentPenalty + componentPenalty;
@@ -408,7 +468,10 @@ function bestBlendForColour(
   candidates: BlendCandidate[],
   accentProtection: AccentProtectionMode,
   mixPriority: VirtualMixPriorityMode,
+  mappingStrategy: MappingStrategyMode,
+  targetWeightShare: number,
   previewLightnessOffset: number,
+  previousSmoothLab: LAB | null = null,
 ): {
   subset: PhysicalSlot[];
   ratios: number[];
@@ -423,7 +486,8 @@ function bestBlendForColour(
 } | null {
   if (candidates.length === 0) return null;
   const targetLab = rgbToLab(targetRgb);
-  let best: (BlendCandidate & { score: number; error: number }) | null = null;
+  let rawBestScore = Number.POSITIVE_INFINITY;
+  const scored: Array<BlendCandidate & { score: number; error: number }> = [];
   for (const candidate of candidates) {
     const error = deltaE76(targetLab, candidate.fdmLab);
     const score = candidateScore(
@@ -432,9 +496,25 @@ function bestBlendForColour(
       candidate,
       accentProtection,
       mixPriority,
+      mappingStrategy,
+      targetWeightShare,
       previewLightnessOffset,
     );
-    if (!best || score < best.score) best = { ...candidate, score, error };
+    rawBestScore = Math.min(rawBestScore, score);
+    scored.push({ ...candidate, score, error });
+  }
+
+  let best: (BlendCandidate & { score: number; error: number }) | null = null;
+  for (const candidate of scored) {
+    let score = candidate.score;
+    if (
+      mappingStrategy === "smooth" &&
+      previousSmoothLab &&
+      candidate.score <= rawBestScore + 7
+    ) {
+      score += deltaE76(previousSmoothLab, candidate.fdmLab) * 0.06;
+    }
+    if (!best || score < best.score) best = { ...candidate, score };
   }
   if (!best) return null;
   return {
@@ -568,6 +648,29 @@ function compatibleForDisplayMerge(
   return distance <= (strong ? 16 : 26) && chromaGap <= (strong ? 0.08 : 0.12);
 }
 
+function comparePaletteForSmoothMapping(a: PaletteEntry, b: PaletteEntry): number {
+  const al = rgbToLab(a.rgb);
+  const bl = rgbToLab(b.rgb);
+  const ac = labChroma(al);
+  const bc = labChroma(bl);
+  const an = ac < 6 ? 1 : 0;
+  const bn = bc < 6 ? 1 : 0;
+  if (an !== bn) return an - bn;
+  if (an === 1) return al.L - bl.L || a.index - b.index;
+  return labHueDegrees(al) - labHueDegrees(bl) || al.L - bl.L || a.index - b.index;
+}
+
+function emptyMappingDiagnostics(): VirtualMappingDiagnostics {
+  return {
+    targetPaletteCount: 0,
+    averageError: 0,
+    worstError: 0,
+    poorMatchCount: 0,
+    poorMatchThreshold: POOR_MAPPING_DELTA_E,
+    collapsedTargetColours: 0,
+  };
+}
+
 export function buildVirtualExtruderPlan(
   palette: PaletteEntry[],
   physicalSlots: PhysicalSlot[],
@@ -580,6 +683,7 @@ export function buildVirtualExtruderPlan(
     ratioStepPercent: options.ratioStepPercent ?? 5,
     accentProtection: options.accentProtection ?? "balanced",
     mixPriority: options.mixPriority ?? "accurate",
+    mappingStrategy: options.mappingStrategy ?? "closest",
     previewLightnessOffset: Number.isFinite(options.previewLightnessOffset)
       ? Math.max(-90, Math.min(30, options.previewLightnessOffset ?? -36))
       : -36,
@@ -611,16 +715,31 @@ export function buildVirtualExtruderPlan(
     opts.maxComponents,
     opts.ratioStepPercent,
   );
+  const totalPaletteWeight = Math.max(
+    1,
+    palette.reduce((sum, entry) => sum + Math.max(0, entry.count), 0),
+  );
+  const orderedPalette =
+    opts.mappingStrategy === "smooth"
+      ? [...palette].sort(comparePaletteForSmoothMapping)
+      : palette;
+  let previousSmoothLab: LAB | null = null;
+  const mappingErrors: Array<{ error: number; weight: number }> = [];
 
-  for (const p of palette) {
+  for (const p of orderedPalette) {
     const best = bestBlendForColour(
       p.rgb,
       blendCandidates,
       opts.accentProtection,
       opts.mixPriority,
+      opts.mappingStrategy,
+      Math.max(0, p.count) / totalPaletteWeight,
       opts.previewLightnessOffset,
+      previousSmoothLab,
     );
     if (!best) continue;
+    mappingErrors.push({ error: best.error, weight: Math.max(1, p.count) });
+    if (opts.mappingStrategy === "smooth") previousSmoothLab = best.fdmLab;
 
     const active = best.active;
 
@@ -735,7 +854,28 @@ export function buildVirtualExtruderPlan(
   const physicalOnly = [...physicalOnlyByExtruder.values()].sort(
     (a, b) => a.paletteIndex - b.paletteIndex,
   );
-  return { virtualBlends, physicalOnly, paletteToAssignment };
+  const assignedTargetCount = virtualBlends.reduce(
+    (sum, entry) => sum + entry.targetPaletteIndices.length,
+    0,
+  ) + physicalOnly.reduce(
+    (sum, entry) => sum + entry.targetPaletteIndices.length,
+    0,
+  );
+  const printableAssignmentCount = virtualBlends.length + physicalOnly.length;
+  const totalErrorWeight = mappingErrors.reduce((sum, item) => sum + item.weight, 0);
+  const mappingDiagnostics: VirtualMappingDiagnostics = mappingErrors.length > 0
+    ? {
+        targetPaletteCount: assignedTargetCount,
+        averageError:
+          mappingErrors.reduce((sum, item) => sum + item.error * item.weight, 0) /
+          Math.max(1, totalErrorWeight),
+        worstError: mappingErrors.reduce((max, item) => Math.max(max, item.error), 0),
+        poorMatchCount: mappingErrors.filter((item) => item.error >= POOR_MAPPING_DELTA_E).length,
+        poorMatchThreshold: POOR_MAPPING_DELTA_E,
+        collapsedTargetColours: Math.max(0, assignedTargetCount - printableAssignmentCount),
+      }
+    : emptyMappingDiagnostics();
+  return { virtualBlends, physicalOnly, paletteToAssignment, mappingDiagnostics };
 }
 
 export function virtualExtruderPlanToCsv(plan: VirtualExtruderPlan): string {

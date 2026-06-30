@@ -9,6 +9,7 @@ import type {
   AccentProtectionMode,
   ColourAdjustments,
   Filament,
+  MappingStrategyMode,
   MeshModel,
   PaletteEntry,
   PhysicalSlot,
@@ -411,6 +412,15 @@ function isVirtualMixPriorityMode(
 ): value is VirtualMixPriorityMode {
   return (
     value === "accurate" || value === "preserve-hue" || value === "avoid-muddy"
+  );
+}
+
+function isMappingStrategyMode(value: unknown): value is MappingStrategyMode {
+  return (
+    value === "closest" ||
+    value === "smooth" ||
+    value === "preserve-hue" ||
+    value === "preserve-accent"
   );
 }
 
@@ -1279,7 +1289,7 @@ function compareText(a: string, b: string): number {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 }
 
-const BLEND_STEP_OPTIONS = [2.5, 5, 10, 20, 25] as const;
+const BLEND_STEP_OPTIONS = [5, 10, 20, 25] as const;
 type BlendStepPercent = (typeof BLEND_STEP_OPTIONS)[number];
 
 function normalizeBlendStepPercent(
@@ -1291,6 +1301,10 @@ function normalizeBlendStepPercent(
   return BLEND_STEP_OPTIONS.includes(rounded as BlendStepPercent)
     ? (rounded as BlendStepPercent)
     : fallback;
+}
+
+function blendRecipeResolutionLabel(step: BlendStepPercent): string {
+  return `${step}% + thirds`;
 }
 
 function suggestionOptions(
@@ -1346,8 +1360,10 @@ function greyscaleAdjustmentsFrom(base: ColourAdjustments): ColourAdjustments {
 
 function componentPercent(count: number, sequenceLength: number): string {
   if (sequenceLength <= 0) return "0%";
+  if (sequenceLength === 3 && count === 1) return "33%";
   const pct = (count / sequenceLength) * 100;
-  return `${pct.toFixed(pct < 10 ? 1 : 0)}%`;
+  const roundedToFive = Math.round(pct / 5) * 5;
+  return `${Math.max(0, Math.min(100, roundedToFive))}%`;
 }
 
 function virtualComponentSummaryText(entry: VirtualBlendEntry): string {
@@ -1490,7 +1506,12 @@ function applyAssignmentOverridesToPlan(
     })
     .sort((a, b) => a.paletteIndex - b.paletteIndex);
 
-  return { virtualBlends, physicalOnly, paletteToAssignment };
+  return {
+    virtualBlends,
+    physicalOnly,
+    paletteToAssignment,
+    mappingDiagnostics: basePlan.mappingDiagnostics,
+  };
 }
 
 function paletteIndexTitle(indices: number[]): string {
@@ -1592,6 +1613,10 @@ export default function App({
     useState<VirtualMixPriorityMode>("accurate");
   const [appliedVirtualMixPriority, setAppliedVirtualMixPriority] =
     useState<VirtualMixPriorityMode>("accurate");
+  const [pendingMappingStrategy, setPendingMappingStrategy] =
+    useState<MappingStrategyMode>("closest");
+  const [appliedMappingStrategy, setAppliedMappingStrategy] =
+    useState<MappingStrategyMode>("closest");
   const [pendingVirtualPreviewLightness, setPendingVirtualPreviewLightness] =
     useState(0);
   const [appliedVirtualPreviewLightness, setAppliedVirtualPreviewLightness] =
@@ -2523,6 +2548,8 @@ export default function App({
       appliedAccentProtection,
       pendingVirtualMixPriority,
       appliedVirtualMixPriority,
+      pendingMappingStrategy,
+      appliedMappingStrategy,
       pendingVirtualPreviewLightness,
       appliedVirtualPreviewLightness,
       pendingAdjustments,
@@ -2698,6 +2725,16 @@ export default function App({
     )
       ? settings.appliedVirtualMixPriority
       : nextPendingVirtualMixPriority;
+    const nextPendingMappingStrategy = isMappingStrategyMode(
+      settings.pendingMappingStrategy,
+    )
+      ? settings.pendingMappingStrategy
+      : "closest";
+    const nextAppliedMappingStrategy = isMappingStrategyMode(
+      settings.appliedMappingStrategy,
+    )
+      ? settings.appliedMappingStrategy
+      : nextPendingMappingStrategy;
     const nextPendingVirtualPreviewLightness = normalizeVirtualPreviewLightness(
       settings.pendingVirtualPreviewLightness,
       pendingVirtualPreviewLightness,
@@ -2877,6 +2914,8 @@ export default function App({
     setAppliedAccentProtection(nextAppliedAccentProtection);
     setPendingVirtualMixPriority(nextPendingVirtualMixPriority);
     setAppliedVirtualMixPriority(nextAppliedVirtualMixPriority);
+    setPendingMappingStrategy(nextPendingMappingStrategy);
+    setAppliedMappingStrategy(nextAppliedMappingStrategy);
     setPendingVirtualPreviewLightness(nextPendingVirtualPreviewLightness);
     setAppliedVirtualPreviewLightness(nextAppliedVirtualPreviewLightness);
     setPendingAdjustments((prev) =>
@@ -3241,6 +3280,7 @@ export default function App({
     pendingBlendStepPercent !== appliedBlendStepPercent ||
     pendingAccentProtection !== appliedAccentProtection ||
     pendingVirtualMixPriority !== appliedVirtualMixPriority ||
+    pendingMappingStrategy !== appliedMappingStrategy ||
     pendingVirtualPreviewLightness !== appliedVirtualPreviewLightness;
 
   function normalizeMaxColours(value: number): number {
@@ -3262,6 +3302,9 @@ export default function App({
     )
       ? pendingVirtualMixPriority
       : "accurate";
+    const nextMappingStrategy = isMappingStrategyMode(pendingMappingStrategy)
+      ? pendingMappingStrategy
+      : "closest";
     const nextVirtualPreviewLightness = normalizeVirtualPreviewLightness(
       pendingVirtualPreviewLightness,
       0,
@@ -3270,12 +3313,14 @@ export default function App({
     setPendingBlendStepPercent(nextStep);
     setPendingAccentProtection(nextAccentProtection);
     setPendingVirtualMixPriority(nextVirtualMixPriority);
+    setPendingMappingStrategy(nextMappingStrategy);
     setPendingVirtualPreviewLightness(nextVirtualPreviewLightness);
     if (!model) {
       setAppliedMaxColours(next);
       setAppliedBlendStepPercent(nextStep);
       setAppliedAccentProtection(nextAccentProtection);
       setAppliedVirtualMixPriority(nextVirtualMixPriority);
+      setAppliedMappingStrategy(nextMappingStrategy);
       setAppliedVirtualPreviewLightness(nextVirtualPreviewLightness);
       return;
     }
@@ -3294,6 +3339,7 @@ export default function App({
       setAppliedBlendStepPercent(nextStep);
       setAppliedAccentProtection(nextAccentProtection);
       setAppliedVirtualMixPriority(nextVirtualMixPriority);
+      setAppliedMappingStrategy(nextMappingStrategy);
       setAppliedVirtualPreviewLightness(nextVirtualPreviewLightness);
     }, 40);
   }
@@ -3303,6 +3349,7 @@ export default function App({
     setPendingBlendStepPercent(appliedBlendStepPercent);
     setPendingAccentProtection(appliedAccentProtection);
     setPendingVirtualMixPriority(appliedVirtualMixPriority);
+    setPendingMappingStrategy(appliedMappingStrategy);
     setPendingVirtualPreviewLightness(appliedVirtualPreviewLightness);
   }
 
@@ -3430,6 +3477,7 @@ export default function App({
       ratioStepPercent: appliedBlendStepPercent,
       accentProtection: appliedAccentProtection,
       mixPriority: appliedVirtualMixPriority,
+      mappingStrategy: appliedMappingStrategy,
       previewLightnessOffset: appliedVirtualPreviewLightness,
     });
   }, [
@@ -3439,6 +3487,7 @@ export default function App({
     appliedBlendStepPercent,
     appliedAccentProtection,
     appliedVirtualMixPriority,
+    appliedMappingStrategy,
     appliedVirtualPreviewLightness,
   ]);
 
@@ -4532,7 +4581,7 @@ export default function App({
                   >
                     {BLEND_STEP_OPTIONS.map((step) => (
                       <option key={step} value={step}>
-                        {step}%
+                        {blendRecipeResolutionLabel(step)}
                       </option>
                     ))}
                   </select>
@@ -4578,6 +4627,29 @@ export default function App({
                     </option>
                     <option value="avoid-muddy">
                       {t.mixPriorityAvoidMuddy}
+                    </option>
+                  </select>
+                </label>
+
+                <label className="inline-row" title={t.tipMappingStrategy}>
+                  <HelpLabel title={t.tipMappingStrategy}>
+                    {t.mappingStrategy}
+                  </HelpLabel>
+                  <select
+                    value={pendingMappingStrategy}
+                    onChange={(e) =>
+                      setPendingMappingStrategy(
+                        isMappingStrategyMode(e.target.value)
+                          ? e.target.value
+                          : "closest",
+                      )
+                    }
+                  >
+                    <option value="closest">{t.mappingClosest}</option>
+                    <option value="smooth">{t.mappingSmooth}</option>
+                    <option value="preserve-hue">{t.mappingHuePreserving}</option>
+                    <option value="preserve-accent">
+                      {t.mappingAccentPreserving}
                     </option>
                   </select>
                 </label>
@@ -4675,6 +4747,29 @@ export default function App({
                         <div>
                           <span>{t.physicalOnlyColours}</span>
                           <b>{virtualExtruderPlan.physicalOnly.length}</b>
+                        </div>
+                      </div>
+                      <div
+                        className="stats compact-stats"
+                        title={t.tipMappingDiagnostics}
+                      >
+                        <div>
+                          <span>{t.averageMappingError}</span>
+                          <b>{virtualExtruderPlan.mappingDiagnostics.averageError.toFixed(1)}</b>
+                        </div>
+                        <div>
+                          <span>{t.worstMappingError}</span>
+                          <b>{virtualExtruderPlan.mappingDiagnostics.worstError.toFixed(1)}</b>
+                        </div>
+                        <div>
+                          <span>{t.poorMatches}</span>
+                          <b>
+                            {virtualExtruderPlan.mappingDiagnostics.poorMatchCount} / {virtualExtruderPlan.mappingDiagnostics.targetPaletteCount}
+                          </b>
+                        </div>
+                        <div>
+                          <span>{t.collapsedTargetColours}</span>
+                          <b>{virtualExtruderPlan.mappingDiagnostics.collapsedTargetColours}</b>
                         </div>
                       </div>
                       <label

@@ -50,7 +50,7 @@ const en: Dict = {
   paletteUsesAppliedColourAdjustment:
     "There are pending colour-correction changes. Apply them in Colour setup before recalculating the palette if those values should be used.",
   maxColours: "Virtual colours",
-  blendStepPercent: "Mixing step",
+  blendStepPercent: "Mixing recipe resolution",
   accentProtection: "Accent colour preservation",
   accentProtectionOff: "Off",
   accentProtectionBalanced: "Balanced",
@@ -59,6 +59,11 @@ const en: Dict = {
   mixPriorityAccurate: "Prusa FDM mixer",
   mixPriorityPreserveHue: "Prusa FDM + hue guard",
   mixPriorityAvoidMuddy: "Prusa FDM + accent split",
+  mappingStrategy: "Mapping strategy",
+  mappingClosest: "Closest match",
+  mappingSmooth: "Smooth transitions",
+  mappingHuePreserving: "Hue-preserving",
+  mappingAccentPreserving: "Accent-preserving",
   virtualPreviewLightness: "Virtual preview brightness",
   virtualPreviewLightnessDarker: "Darker",
   virtualPreviewLightnessSlightlyDarker: "Slightly darker",
@@ -319,13 +324,15 @@ const en: Dict = {
   tipResetOrientation:
     "Restores the loaded model to its original imported orientation and refits the preview.",
   tipMaxColours:
-    "Maximum number of virtual target colours after palette reduction, up to 256. This is the reduced target palette; coarse mixing steps may map several target colours to fewer printable blends. This does not limit the number of physical extruder slots.",
+    "Maximum number of virtual target colours after palette reduction, up to 256. This is the reduced target palette; coarse recipe resolutions may map several target colours to fewer printable blends. This does not limit the number of physical extruder slots.",
   tipBlendStepPercent:
-    "Quantizes virtual-extruder component ratios before layer sequences are built. Smaller steps keep finer colour detail; larger steps create coarser, more stable virtual mixtures. 5% is the PrusaSlicer-like default.",
+    "Controls which printable virtual-extruder recipes are generated. Non-equal-third recipes use PrusaSlicer-compatible 5% percentage steps or coarser multiples. The equal three-colour recipe is kept as exact 1:1:1 and displayed as 33/33/33.",
   tipAccentProtection:
     "Controls how strongly small but visually distinct accent colours are preserved through palette reduction, palette matching, virtual-mix selection and print simulation. Off favours maximum reduction. Balanced is the default. Strong reserves more chromatic accents and merges larger similar areas more readily.",
   tipVirtualMixPriority:
-    "Controls how palette colours are mapped to printable virtual mixtures. Prusa FDM mixer uses the calibrated Yule-Nielsen/LAB model instead of a simple RGB layer average. Hue guard and accent split keep visually distinct target colours separated more conservatively when they would otherwise share one layer sequence.",
+    "Controls the colour model and conservative hue/accent guards used while selecting printable virtual mixtures. The calibrated Prusa FDM mixer remains the base model instead of a simple RGB layer average.",
+  tipMappingStrategy:
+    "Controls how reduced target-palette colours are mapped to printable physical or virtual blends. Closest match minimizes individual colour error. Smooth transitions favours more continuous printable colours between neighbouring target tones. Hue-preserving penalizes wrong hue direction. Accent-preserving protects small saturated target colours during mapping.",
   tipVirtualPreviewLightness:
     "Adjusts only the displayed virtual-mix and print-simulation brightness. It does not change the reduced target palette, layer sequences or 3MF export. Darker modes now apply a stronger LAB lightness reduction because calibrated FDM prediction can appear too light in the browser preview.",
   tipPhysicalExtruders:
@@ -481,7 +488,7 @@ const en: Dict = {
   tipApplyPaletteSettings:
     "Rebuilds the reduced virtual-colour palette, effective layer sequences and WebGL preview from the current virtual-colour settings. This is applied manually to avoid blocking large models while editing.",
   tipResetPaletteSettings:
-    "Resets pending virtual-colour, mixing-step, accent-preservation and virtual-mix-priority settings to the last applied values.",
+    "Resets pending virtual-colour, mixing-step, accent-preservation, virtual-mix-priority and mapping-strategy settings to the last applied values.",
   export: "Export",
   exportIntro:
     "Generate a PrusaSlicer 3MF project from the prepared model, palette and physical colour setup. Template settings are used when a 3MF template is loaded; otherwise the app creates a minimal project.",
@@ -554,6 +561,12 @@ const en: Dict = {
   paletteColours: "Palette colours",
   virtualBlends: "Effective virtual blends",
   physicalOnlyColours: "Physical-only colours",
+  averageMappingError: "Average mapping error",
+  worstMappingError: "Worst mapping error",
+  poorMatches: "Poor matches",
+  collapsedTargetColours: "Collapsed target colours",
+  tipMappingDiagnostics:
+    "Perceptual LAB diagnostics for mapping the reduced target palette to printable physical and virtual blends. High values usually mean that the selected physical colours or coarse mixing step cannot represent parts of the palette well.",
   moreVirtualBlends: "more virtual blends",
   noLayerSequencePlan:
     "Load a model and select physical colours to calculate effective layer sequences.",

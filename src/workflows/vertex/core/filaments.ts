@@ -46,9 +46,9 @@ export const physicalColourPresets: Record<string, RGB[]> = {
   BRY: [[0, 101, 170], [194, 0, 25], [234, 189, 0]],
 
   // Gamut extensions: add saturated spot colours that are hard to approximate with the base set.
-  'CMYWK+R': [[0, 255, 255], [255, 0, 255], [255, 255, 0], [255, 255, 255], [0, 0, 0], [210, 25, 25]],
-  'CMYWK+RG': [[0, 255, 255], [255, 0, 255], [255, 255, 0], [255, 255, 255], [0, 0, 0], [210, 25, 25], [35, 145, 45]],
-  'CMYWK+RGB': [[0, 255, 255], [255, 0, 255], [255, 255, 0], [255, 255, 255], [0, 0, 0], [210, 25, 25], [35, 145, 45], [0, 80, 190]],
+  'CMYWK+R': [[0, 255, 255], [255, 0, 255], [255, 255, 0], [255, 255, 255], [0, 0, 0], [255, 0, 0]],
+  'CMYWK+RG': [[0, 255, 255], [255, 0, 255], [255, 255, 0], [255, 255, 255], [0, 0, 0], [255, 0, 0], [0, 255, 0]],
+  'CMYWK+RGB': [[0, 255, 255], [255, 0, 255], [255, 255, 0], [255, 255, 255], [0, 0, 0], [255, 0, 0], [0, 255, 0], [0, 0, 255]],
   'BRYWK+G': [[0, 101, 170], [194, 0, 25], [234, 189, 0], [255, 255, 255], [0, 0, 0], [35, 145, 45]],
   'BRYWK+GC': [[0, 101, 170], [194, 0, 25], [234, 189, 0], [255, 255, 255], [0, 0, 0], [35, 145, 45], [0, 210, 210]],
   'BRYWK+GCM': [[0, 101, 170], [194, 0, 25], [234, 189, 0], [255, 255, 255], [0, 0, 0], [35, 145, 45], [0, 210, 210], [220, 0, 180]],
@@ -253,40 +253,88 @@ function constrainedMixForSubset(target: [number, number, number], subset: Filam
   return weights.map(w => w / sum);
 }
 
-function snapRatiosToStep(weights: number[], stepPercent: number): number[] {
-  const totalUnits = Math.max(1, Math.round(100 / Math.max(0.1, stepPercent)));
-  const raw = weights.map(w => Math.max(0, w) * totalUnits);
-  let units = raw.map(v => Math.max(0, Math.round(v)));
-  if (units.every(v => v === 0)) {
-    const best = raw.reduce((bestIdx, value, idx) => value > raw[bestIdx] ? idx : bestIdx, 0);
-    units = units.map((_v, idx) => idx === best ? totalUnits : 0);
-  }
+const BLEND_PERCENT_UNIT = 5;
+const BLEND_TOTAL_UNITS = Math.round(100 / BLEND_PERCENT_UNIT);
 
-  const adjustOnce = (direction: 1 | -1) => {
-    let bestIndex = -1;
-    let bestScore = Number.NEGATIVE_INFINITY;
-    for (let i = 0; i < units.length; i++) {
-      if (direction < 0 && units[i] <= 0) continue;
-      const score = direction > 0 ? raw[i] - units[i] : units[i] - raw[i];
-      if (score > bestScore) {
-        bestScore = score;
-        bestIndex = i;
+function stepPercentToUnits(stepPercent: number): number {
+  const safeStep = Number.isFinite(stepPercent) ? stepPercent : 5;
+  return Math.max(1, Math.round(safeStep / BLEND_PERCENT_UNIT));
+}
+
+function buildSnappingCompositions(parts: number, totalUnits: number, stepUnits: number): number[][] {
+  const allowedOffGridComponents = totalUnits % stepUnits === 0 ? 0 : 1;
+  const out: number[][] = [];
+  const seen = new Set<string>();
+  const addCounts = (counts: number[]) => {
+    if (counts.length !== parts) return;
+    const positive = counts.filter(count => count > 0);
+    if (positive.length === 0) return;
+    const positiveGcd = positive.reduce((acc, count) => {
+      let a = Math.abs(Math.round(acc));
+      let b = Math.abs(Math.round(count));
+      while (b !== 0) {
+        const t = b;
+        b = a % b;
+        a = t;
       }
-    }
-    if (bestIndex >= 0) units[bestIndex] += direction;
+      return a || 1;
+    }, positive[0] ?? 1);
+    const key = counts.map(count => count > 0 ? Math.round(count / positiveGcd) : 0).join(":");
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(counts);
   };
 
-  let sumUnits = units.reduce((s, v) => s + v, 0);
-  while (sumUnits < totalUnits) { adjustOnce(1); sumUnits += 1; }
-  while (sumUnits > totalUnits) {
-    const before = sumUnits;
-    adjustOnce(-1);
-    sumUnits = units.reduce((s, v) => s + v, 0);
-    if (sumUnits === before) break;
+  const rec = (remainingParts: number, remainingUnits: number, current: number[]) => {
+    if (remainingParts === 1) {
+      const counts = [...current, remainingUnits];
+      const positive = counts.filter(count => count > 0);
+      if (positive.length === 0) return;
+      if (positive.some(count => count < stepUnits)) return;
+      const offGrid = positive.filter(count => count % stepUnits !== 0).length;
+      if (offGrid <= allowedOffGridComponents) addCounts(counts);
+      return;
+    }
+
+    for (let count = 0; count <= remainingUnits; count++) {
+      rec(remainingParts - 1, remainingUnits - count, [...current, count]);
+    }
+  };
+
+  rec(parts, totalUnits, []);
+
+  // Keep filament suggestions aligned with the virtual-extruder planner: all
+  // printable recipes use 5% steps, except the equal three-colour 1:1:1 recipe.
+  // Two-colour thirds are not PrusaSlicer-style UI recipes; nearby 35/65 and
+  // 65/35 mixes are evaluated by the 5% grid.
+  if (parts === 3) {
+    addCounts([1, 1, 1]);
   }
 
-  const finalSum = Math.max(1, units.reduce((s, v) => s + v, 0));
-  return units.map(u => u / finalSum);
+  return out;
+}
+
+function snapRatiosToStep(weights: number[], stepPercent: number): number[] {
+  const totalUnits = BLEND_TOTAL_UNITS;
+  const stepUnits = stepPercentToUnits(stepPercent);
+  const raw = weights.map(w => Math.max(0, w) * totalUnits);
+  const compositions = buildSnappingCompositions(weights.length, totalUnits, stepUnits);
+
+  let best = compositions[0] ?? raw.map(() => 0);
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (const candidate of compositions) {
+    const score = candidate.reduce((sum, count, index) => {
+      const delta = count - (raw[index] ?? 0);
+      return sum + delta * delta;
+    }, 0);
+    if (score < bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
+  }
+
+  const finalSum = Math.max(1, best.reduce((s, v) => s + v, 0));
+  return best.map(u => u / finalSum);
 }
 
 function predictRgb(subset: Filament[], weights: number[]): RGB {
