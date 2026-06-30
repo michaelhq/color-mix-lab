@@ -261,7 +261,13 @@ function stepPercentToUnits(stepPercent: number): number {
   return Math.max(1, Math.round(safeStep / BLEND_PERCENT_UNIT));
 }
 
+const snappingCompositionCache = new Map<string, number[][]>();
+
 function buildSnappingCompositions(parts: number, totalUnits: number, stepUnits: number): number[][] {
+  const cacheKey = `${parts}|${totalUnits}|${stepUnits}`;
+  const cached = snappingCompositionCache.get(cacheKey);
+  if (cached) return cached;
+
   const allowedOffGridComponents = totalUnits % stepUnits === 0 ? 0 : 1;
   const out: number[][] = [];
   const seen = new Set<string>();
@@ -311,7 +317,28 @@ function buildSnappingCompositions(parts: number, totalUnits: number, stepUnits:
     addCounts([1, 1, 1]);
   }
 
+  snappingCompositionCache.set(cacheKey, out);
   return out;
+}
+
+interface FilamentSuggestionScoreCache {
+  mixScores: Map<string, { score: number; rgbError: number; satPenalty: number }>;
+  filamentKeys: Map<Filament, string>;
+}
+
+function filamentScoreKey(filament: Filament, fallbackIndex: number): string {
+  return `${fallbackIndex}|${filament.name}|${filament.type}|${rgbToHex(filament.effectiveRgb)}|${filament.sourceLine}`;
+}
+
+function paletteScoreKey(rgb: RGB): string {
+  return rgbToHex(rgb);
+}
+
+function subsetScoreKey(subset: Filament[], cache: FilamentSuggestionScoreCache): string {
+  return subset
+    .map((filament) => cache.filamentKeys.get(filament) || `${filament.name}|${rgbToHex(filament.effectiveRgb)}`)
+    .sort()
+    .join('+');
 }
 
 function snapRatiosToStep(weights: number[], stepPercent: number): number[] {
@@ -363,38 +390,65 @@ function hueDistance(a: number, b: number): number {
   return Math.min(d, 360 - d);
 }
 
-function bestMixScoreForColour(targetRgb: RGB, selected: Filament[], opts: SuggestionOptions): { score: number; rgbError: number; satPenalty: number } {
+function scoreMixSubset(
+  targetRgb: RGB,
+  subset: Filament[],
+  opts: SuggestionOptions,
+  cache?: FilamentSuggestionScoreCache,
+): { score: number; rgbError: number; satPenalty: number } | null {
+  const cacheKey = cache ? `${paletteScoreKey(targetRgb)}|${opts.ratioStepPercent}|${opts.saturationPenalty}|${subsetScoreKey(subset, cache)}` : '';
+  if (cache) {
+    const cached = cache.mixScores.get(cacheKey);
+    if (cached) return cached;
+  }
+
   const target = targetRgb.map(v => v / 255) as [number, number, number];
+  const targetSat = saturation(targetRgb);
+  const weights = constrainedMixForSubset(target, subset);
+  if (!weights) return null;
+  const snapped = snapRatiosToStep(weights, opts.ratioStepPercent);
+  const activeSubset: Filament[] = [];
+  const activeWeights: number[] = [];
+  snapped.forEach((w, i) => {
+    if (w > 1e-9) {
+      activeSubset.push(subset[i]);
+      activeWeights.push(w);
+    }
+  });
+  if (activeSubset.length === 0) return null;
+  const predicted = predictRgb(activeSubset, activeWeights);
+  const rgbError = Math.sqrt(squaredDistance(targetRgb, predicted));
+  let satPenalty = 0;
+  for (let i = 0; i < activeSubset.length; i++) {
+    const physSat = saturation(activeSubset[i].effectiveRgb);
+    const excess = Math.max(0, physSat - targetSat - 0.10);
+    satPenalty += activeWeights[i] * excess * excess;
+  }
+  const satPenalty255 = Math.sqrt(satPenalty) * 255;
+  const componentPenalty = Math.max(0, activeSubset.length - 1) * 0.25;
+  const result = {
+    score: rgbError + opts.saturationPenalty * satPenalty255 + componentPenalty,
+    rgbError,
+    satPenalty: satPenalty255,
+  };
+  if (cache) cache.mixScores.set(cacheKey, result);
+  return result;
+}
+
+function bestMixScoreForColour(
+  targetRgb: RGB,
+  selected: Filament[],
+  opts: SuggestionOptions,
+  cache?: FilamentSuggestionScoreCache,
+): { score: number; rgbError: number; satPenalty: number } {
   let best: { score: number; rgbError: number; satPenalty: number } | null = null;
   const maxSize = Math.min(opts.maxComponents, selected.length) as 1 | 2 | 3;
-  const targetSat = saturation(targetRgb);
 
   for (let size = 1; size <= maxSize; size++) {
     for (const subset of combinations(selected, size)) {
-      const weights = constrainedMixForSubset(target, subset);
-      if (!weights) continue;
-      const snapped = snapRatiosToStep(weights, opts.ratioStepPercent);
-      const activeSubset: Filament[] = [];
-      const activeWeights: number[] = [];
-      snapped.forEach((w, i) => {
-        if (w > 1e-9) {
-          activeSubset.push(subset[i]);
-          activeWeights.push(w);
-        }
-      });
-      if (activeSubset.length === 0) continue;
-      const predicted = predictRgb(activeSubset, activeWeights);
-      const rgbError = Math.sqrt(squaredDistance(targetRgb, predicted));
-      let satPenalty = 0;
-      for (let i = 0; i < activeSubset.length; i++) {
-        const physSat = saturation(activeSubset[i].effectiveRgb);
-        const excess = Math.max(0, physSat - targetSat - 0.10);
-        satPenalty += activeWeights[i] * excess * excess;
-      }
-      const satPenalty255 = Math.sqrt(satPenalty) * 255;
-      const componentPenalty = Math.max(0, activeSubset.length - 1) * 0.25;
-      const score = rgbError + opts.saturationPenalty * satPenalty255 + componentPenalty;
-      if (!best || score < best.score) best = { score, rgbError, satPenalty: satPenalty255 };
+      const scored = scoreMixSubset(targetRgb, subset, opts, cache);
+      if (!scored) continue;
+      if (!best || scored.score < best.score) best = scored;
     }
   }
 
@@ -463,13 +517,18 @@ function neutralAnchorPenalty(selected: Filament[], palette: PaletteEntry[], wei
   return Math.sqrt(best) * 255 * fraction;
 }
 
-function evaluateFilamentSet(selected: Filament[], palette: PaletteEntry[], opts: SuggestionOptions): number {
+function evaluateFilamentSet(
+  selected: Filament[],
+  palette: PaletteEntry[],
+  opts: SuggestionOptions,
+  cache?: FilamentSuggestionScoreCache,
+): number {
   if (selected.length === 0) return Number.POSITIVE_INFINITY;
   const weights = suggestionWeights(palette, opts);
   const totalWeight = Math.max(1e-9, weights.reduce((s, w) => s + w, 0));
   let fitSum = 0;
   for (let i = 0; i < palette.length; i++) {
-    const best = bestMixScoreForColour(palette[i].rgb, selected, opts);
+    const best = bestMixScoreForColour(palette[i].rgb, selected, opts, cache);
     fitSum += weights[i] * best.score * best.score;
   }
   const fitScore = Math.sqrt(fitSum / totalWeight);
@@ -505,12 +564,20 @@ export function suggestPhysicalSlots(
   if (palette.length === 0 || candidates.length === 0) return [];
   if (candidates.length <= count) return fixedSlotsFromFilaments(candidates, count);
 
+  const filamentKeys = new Map<Filament, string>();
+  candidates.forEach((filament, index) => {
+    filamentKeys.set(filament, filamentScoreKey(filament, index));
+  });
+  const suggestionScoreCache: FilamentSuggestionScoreCache = {
+    mixScores: new Map(),
+    filamentKeys,
+  };
   const scoreCache = new Map<string, number>();
   const scoreSet = (set: Filament[]): number => {
-    const key = set.map(f => `${f.name}|${rgbToHex(f.effectiveRgb)}|${f.sourceLine}`).sort().join('||');
+    const key = set.map(f => filamentKeys.get(f) || `${f.name}|${rgbToHex(f.effectiveRgb)}|${f.sourceLine}`).sort().join('||');
     const cached = scoreCache.get(key);
     if (cached !== undefined) return cached;
-    const score = evaluateFilamentSet(set, palette, opts);
+    const score = evaluateFilamentSet(set, palette, opts, suggestionScoreCache);
     scoreCache.set(key, score);
     return score;
   };
