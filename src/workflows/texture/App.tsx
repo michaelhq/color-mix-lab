@@ -2540,6 +2540,7 @@ export default function App({
                     .join(" ")}
                   onClick={() => setActiveTextureTab(tabId)}
                   title={tip}
+                  aria-label={tip}
                 >
                   <span className="sidebar-tab-label">{label}</span>
                   {health && (

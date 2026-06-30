@@ -694,6 +694,10 @@ button.danger-outline {
 .app.theme-light {
   background: #f4f6f8;
   color: #14202b;
+  color-scheme: light;
+}
+.cml-theme-light {
+  color-scheme: light;
 }
 .app.theme-light .topbar,
 .app.theme-light .card,
@@ -3043,4 +3047,96 @@ textarea { font: inherit; }
 .cml-theme-light .cml-texture-pane .tab-health-dot {
   border-color: rgba(20, 32, 43, 0.26) !important;
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6) !important;
+}
+
+/* v0.7.40/0.7.41: Light theme contrast. Native/browser tooltips are used; no app-level tooltip overlays. */
+.cml-theme-light .cml-texture-pane select,
+.cml-theme-light .cml-vertex-pane select,
+.cml-theme-light .cml-texture-pane input,
+.cml-theme-light .cml-vertex-pane input,
+.cml-theme-light .cml-texture-pane textarea,
+.cml-theme-light .cml-vertex-pane textarea,
+.cml-theme-light .cml-global-controls select {
+  background: #ffffff !important;
+  color: #14202b !important;
+  border-color: #c8d2df !important;
+}
+.cml-theme-light .cml-texture-pane select option,
+.cml-theme-light .cml-vertex-pane select option,
+.cml-theme-light .cml-global-controls select option {
+  background: #ffffff;
+  color: #14202b;
+}
+
+.cml-theme-light input[type="checkbox"] {
+  color-scheme: light !important;
+  accent-color: #2f7dd1 !important;
+  background: #ffffff !important;
+  border-color: #7b8795 !important;
+}
+.cml-theme-light .cml-texture-pane input:disabled,
+.cml-theme-light .cml-vertex-pane input:disabled,
+.cml-theme-light .cml-texture-pane select:disabled,
+.cml-theme-light .cml-vertex-pane select:disabled {
+  background: #eef3f8 !important;
+  color: #667587 !important;
+  border-color: #d7dee8 !important;
+}
+.cml-theme-light .cml-main .sidebar-tabs button:hover:not(:disabled):not(.active),
+.cml-theme-light .cml-texture-pane .texture-tabs button:hover:not(:disabled):not(.active),
+.cml-theme-light .cml-texture-pane .sidebar-tabs button:hover:not(:disabled):not(.active),
+.cml-theme-light .cml-vertex-pane .sidebar-tabs button:hover:not(:disabled):not(.active) {
+  background: #eef4fb !important;
+  color: #14202b !important;
+  border-color: #c8d2df !important;
+}
+.cml-theme-light .cml-main .card h3,
+.cml-theme-light .cml-texture-pane .card h3,
+.cml-theme-light .cml-texture-pane .subhead,
+.cml-theme-light .cml-vertex-pane .card h3,
+.cml-theme-light .cml-main .section-subtitle,
+.cml-theme-light .cml-main .section-mini-title,
+.cml-theme-light .cml-texture-pane .section-subtitle,
+.cml-theme-light .cml-texture-pane .section-mini-title,
+.cml-theme-light .cml-vertex-pane .section-subtitle,
+.cml-theme-light .cml-vertex-pane .section-mini-title,
+.cml-theme-light .cml-texture-pane .preview-cell-title,
+.cml-theme-light .cml-vertex-pane .preview-cell-title,
+.cml-theme-light .cml-texture-pane .preview-toolbar label,
+.cml-theme-light .cml-vertex-pane .preview-toolbar label,
+.cml-theme-light .cml-texture-pane .preview-control-row label,
+.cml-theme-light .cml-vertex-pane .preview-control-row label {
+  color: #253242 !important;
+}
+.cml-theme-light .cml-main .workflow-intro,
+.cml-theme-light .cml-main .muted,
+.cml-theme-light .cml-main .note,
+.cml-theme-light .cml-texture-pane .workflow-intro,
+.cml-theme-light .cml-texture-pane .muted,
+.cml-theme-light .cml-texture-pane .note,
+.cml-theme-light .cml-vertex-pane .workflow-intro,
+.cml-theme-light .cml-vertex-pane .muted,
+.cml-theme-light .cml-vertex-pane .note {
+  color: #5d6875 !important;
+}
+.cml-theme-light .warning,
+.cml-theme-light .warning-note,
+.cml-theme-light .adjustment-note,
+.cml-theme-light .preview-risk-note,
+.cml-theme-light .cml-texture-pane .warning-list,
+.cml-theme-light .cml-texture-pane .stats .warning-row,
+.cml-theme-light .cml-texture-pane .stats .warning-row span {
+  color: #8a5d00 !important;
+}
+.cml-theme-light .lock-note,
+.cml-theme-light .adjustment-note {
+  background: rgba(166, 112, 0, 0.08) !important;
+  border-color: rgba(166, 112, 0, 0.22) !important;
+}
+
+.cml-texture-pane .texture-correction-row {
+  grid-template-columns: 145px minmax(150px, 1fr) 70px !important;
+}
+.cml-texture-pane .texture-correction-row .number {
+  width: 70px !important;
 }

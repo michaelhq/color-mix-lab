@@ -4244,6 +4244,7 @@ export default function App({
                 onClick={() => setActiveTab(tab.id)}
                 disabled={tab.disabled}
                 title={tab.tip}
+                aria-label={tab.tip ? `${tab.label}: ${tab.tip}` : tab.label}
               >
                 {tab.label}
               </button>
