@@ -16,7 +16,7 @@ interface BakedObjHandoffPayload {
   faceCount: number;
 }
 
-const APP_VERSION = "0.7.43";
+const APP_VERSION = "0.7.44";
 const THEME_STORAGE_KEY = "color-mix-lab-theme-mode";
 
 function getSystemTheme(): ResolvedTheme {

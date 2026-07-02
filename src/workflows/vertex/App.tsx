@@ -4167,9 +4167,14 @@ export default function App({
       tip: t.tipModelOrientation,
     },
     {
+      id: "adjustment",
+      label: t.tabColourAdjustment,
+      tip: t.modelColourCorrectionIntro,
+    },
+    {
       id: "physical",
       label: t.colourSetup,
-      tip: "Prepare imported vertex colours, physical E-slot colours and filament-list suggestions before palette reduction.",
+      tip: "Define physical E-slot colours and filament-list suggestions before palette reduction.",
     },
     {
       id: "palette",
@@ -5080,7 +5085,7 @@ export default function App({
               </section>
             )}
 
-            {activeTab === "physical" && (
+            {activeTab === "adjustment" && (
               <section className="card tab-card workflow-card">
                 <h2>{t.modelColourCorrection}</h2>
                 <p className="muted workflow-intro">

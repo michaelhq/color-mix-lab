@@ -48,7 +48,7 @@ const en: Dict = {
   reducedTargetPalette: "Reduced target palette",
   printableVirtualMixes: "Printable virtual mixtures",
   paletteUsesAppliedColourAdjustment:
-    "There are pending colour-correction changes. Apply them in Colour setup before recalculating the palette if those values should be used.",
+    "There are pending colour-correction changes. Apply them in Colour correction before recalculating the palette if those values should be used.",
   maxColours: "Virtual colours",
   blendStepPercent: "Mixing recipe resolution",
   accentProtection: "Accent colour preservation",
