@@ -50,6 +50,12 @@ const en: Dict = {
   paletteUsesAppliedColourAdjustment:
     "There are pending colour-correction changes. Apply them in Colour correction before recalculating the palette if those values should be used.",
   maxColours: "Virtual colours",
+  colourAssignmentMode: "Colour assignment mode",
+  assignmentPhysicalOnly: "Physical only",
+  assignmentPhysicalAndVirtual: "Physical + virtual mixtures",
+  maxVirtualMixComponents: "Max. colours per virtual mixture",
+  maxVirtualMixComponents2: "2 colours",
+  maxVirtualMixComponents3: "3 colours",
   blendStepPercent: "Mixing recipe resolution",
   accentProtection: "Accent colour preservation",
   accentProtectionOff: "Off",
@@ -325,8 +331,12 @@ const en: Dict = {
     "Restores the loaded model to its original imported orientation and refits the preview.",
   tipMaxColours:
     "Maximum number of virtual target colours after palette reduction, up to 256. This is the reduced target palette; coarse recipe resolutions may map several target colours to fewer printable blends. This does not limit the number of physical extruder slots.",
+  tipColourAssignmentMode:
+    "Controls whether reduced target-palette colours are assigned only to real physical E-slots or may also use printable virtual mixtures.",
+  tipMaxVirtualMixComponents:
+    "Limits virtual mixtures to at most two or three physical colours. A one-colour assignment is treated as a direct physical extruder, not as a virtual mixture.",
   tipBlendStepPercent:
-    "Controls which printable virtual-extruder recipes are generated. Non-equal-third recipes use PrusaSlicer-compatible 5% percentage steps or coarser multiples. The equal three-colour recipe is kept as exact 1:1:1 and displayed as 33/33/33.",
+    "Controls which printable virtual-extruder recipes are generated. 5%, 10%, 20% and 25% modes use PrusaSlicer-compatible percentage grids plus the exact 33/33/33 three-colour recipe. Thirds only allows 33/67, 67/33 and 33/33/33. 50% + thirds allows 50/50 and 33/33/33.",
   tipAccentProtection:
     "Controls how strongly small but visually distinct accent colours are preserved through palette reduction, palette matching, virtual-mix selection and print simulation. Off favours maximum reduction. Balanced is the default. Strong reserves more chromatic accents and merges larger similar areas more readily.",
   tipVirtualMixPriority:
@@ -482,13 +492,13 @@ const en: Dict = {
   paletteColoursGenerated: "palette colours generated",
   noPaletteYet: "No palette calculated yet.",
   unappliedPaletteChanges:
-    "Virtual-colour settings are pending. Click Apply to rebuild the reduced palette, layer sequences and preview.",
+    "Virtual-colour settings are pending. Click Apply to rebuild the reduced palette, assignments, layer sequences and preview.",
   applyingPaletteSettings: "Applying virtual-colour settings...",
   appliedPaletteSettings: "Virtual-colour settings applied.",
   tipApplyPaletteSettings:
     "Rebuilds the reduced virtual-colour palette, effective layer sequences and WebGL preview from the current virtual-colour settings. This is applied manually to avoid blocking large models while editing.",
   tipResetPaletteSettings:
-    "Resets pending virtual-colour, mixing-step, accent-preservation, virtual-mix-priority and mapping-strategy settings to the last applied values.",
+    "Resets pending virtual-colour, assignment-mode, mixture-limit, recipe-resolution, accent-preservation, virtual-mix-priority and mapping-strategy settings to the last applied values.",
   export: "Export",
   exportIntro:
     "Generate a PrusaSlicer 3MF project from the prepared model, palette and physical colour setup. Template settings are used when a 3MF template is loaded; otherwise the app creates a minimal project.",

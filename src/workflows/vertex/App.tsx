@@ -8,8 +8,10 @@ import React, {
 import type {
   AccentProtectionMode,
   ColourAdjustments,
+  ColourAssignmentMode,
   Filament,
   MappingStrategyMode,
+  MixingRecipeResolution,
   MeshModel,
   PaletteEntry,
   PhysicalSlot,
@@ -560,7 +562,7 @@ function restoreSuggestionExpertSettings(
   };
 }
 
-const SETTINGS_FILE_VERSION = "0.5.11";
+const SETTINGS_FILE_VERSION = "0.5.12";
 
 function formatInt(value: number): string {
   return Number.isFinite(value) ? Math.round(value).toLocaleString() : "0";
@@ -1289,28 +1291,72 @@ function compareText(a: string, b: string): number {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 }
 
-const BLEND_STEP_OPTIONS = [5, 10, 20, 25] as const;
-type BlendStepPercent = (typeof BLEND_STEP_OPTIONS)[number];
+const RECIPE_RESOLUTION_OPTIONS: MixingRecipeResolution[] = [
+  "grid5",
+  "grid10",
+  "grid20",
+  "grid25",
+  "thirds",
+  "half-thirds",
+];
 
-function normalizeBlendStepPercent(
-  value: number,
-  fallback: BlendStepPercent = 5,
-): BlendStepPercent {
-  if (!Number.isFinite(value)) return fallback;
-  const rounded = Math.round(value * 10) / 10;
-  return BLEND_STEP_OPTIONS.includes(rounded as BlendStepPercent)
-    ? (rounded as BlendStepPercent)
-    : fallback;
+function recipeResolutionFromLegacyStep(value: number): MixingRecipeResolution {
+  if (value === 10) return "grid10";
+  if (value === 20) return "grid20";
+  if (value === 25) return "grid25";
+  if (value === 50) return "half-thirds";
+  return "grid5";
 }
 
-function blendRecipeResolutionLabel(step: BlendStepPercent): string {
-  return `${step}% + thirds`;
+function normalizeRecipeResolution(
+  value: unknown,
+  fallback: MixingRecipeResolution = "grid5",
+): MixingRecipeResolution {
+  if (typeof value === "string") {
+    if (RECIPE_RESOLUTION_OPTIONS.includes(value as MixingRecipeResolution))
+      return value as MixingRecipeResolution;
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return recipeResolutionFromLegacyStep(numeric);
+  }
+  if (typeof value === "number" && Number.isFinite(value))
+    return recipeResolutionFromLegacyStep(Math.round(value));
+  return fallback;
+}
+
+function recipeResolutionLabel(recipeResolution: MixingRecipeResolution): string {
+  switch (recipeResolution) {
+    case "grid10":
+      return "10% + thirds";
+    case "grid20":
+      return "20% + thirds";
+    case "grid25":
+      return "25% + thirds";
+    case "thirds":
+      return "Thirds only";
+    case "half-thirds":
+      return "50% + thirds";
+    case "grid5":
+    default:
+      return "5% + thirds";
+  }
+}
+
+function isColourAssignmentMode(value: unknown): value is ColourAssignmentMode {
+  return value === "physical-only" || value === "physical-and-virtual";
+}
+
+function normalizeMaxVirtualMixComponents(value: unknown, fallback: 2 | 3 = 3): 2 | 3 {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (numeric === 2) return 2;
+  if (numeric === 3) return 3;
+  return fallback;
 }
 
 function suggestionOptions(
   mode: SuggestionMode,
   expert: SuggestionExpertSettings,
-  ratioStepPercent: number,
+  recipeResolution: MixingRecipeResolution,
+  maxComponents: 1 | 2 | 3,
 ) {
   const base =
     mode === "expert"
@@ -1341,7 +1387,11 @@ function suggestionOptions(
               neutralWeight: 0.5,
               maxComponents: 3 as const,
             };
-  return { ...base, ratioStepPercent };
+  return {
+    ...base,
+    maxComponents: Math.min(base.maxComponents, maxComponents) as 1 | 2 | 3,
+    recipeResolution,
+  };
 }
 
 function isGreyscalePreset(name: string): boolean {
@@ -1601,10 +1651,18 @@ export default function App({
 
   const [pendingMaxColours, setPendingMaxColours] = useState(128);
   const [appliedMaxColours, setAppliedMaxColours] = useState(128);
-  const [pendingBlendStepPercent, setPendingBlendStepPercent] =
-    useState<BlendStepPercent>(5);
-  const [appliedBlendStepPercent, setAppliedBlendStepPercent] =
-    useState<BlendStepPercent>(5);
+  const [pendingRecipeResolution, setPendingRecipeResolution] =
+    useState<MixingRecipeResolution>("grid5");
+  const [appliedRecipeResolution, setAppliedRecipeResolution] =
+    useState<MixingRecipeResolution>("grid5");
+  const [pendingColourAssignmentMode, setPendingColourAssignmentMode] =
+    useState<ColourAssignmentMode>("physical-and-virtual");
+  const [appliedColourAssignmentMode, setAppliedColourAssignmentMode] =
+    useState<ColourAssignmentMode>("physical-and-virtual");
+  const [pendingMaxVirtualMixComponents, setPendingMaxVirtualMixComponents] =
+    useState<2 | 3>(3);
+  const [appliedMaxVirtualMixComponents, setAppliedMaxVirtualMixComponents] =
+    useState<2 | 3>(3);
   const [pendingAccentProtection, setPendingAccentProtection] =
     useState<AccentProtectionMode>("off");
   const [appliedAccentProtection, setAppliedAccentProtection] =
@@ -2542,8 +2600,12 @@ export default function App({
       appliedSuggestionExpertSettings,
       pendingMaxColours,
       appliedMaxColours,
-      pendingBlendStepPercent,
-      appliedBlendStepPercent,
+      pendingRecipeResolution,
+      appliedRecipeResolution,
+      pendingColourAssignmentMode,
+      appliedColourAssignmentMode,
+      pendingMaxVirtualMixComponents,
+      appliedMaxVirtualMixComponents,
       pendingAccentProtection,
       appliedAccentProtection,
       pendingVirtualMixPriority,
@@ -2693,17 +2755,31 @@ export default function App({
     const nextAppliedMaxColours = normalizeMaxColours(
       numberSetting(settings.appliedMaxColours, pendingMaxFromFile),
     );
-    const pendingBlendStepFromFile = numberSetting(
-      settings.pendingBlendStepPercent,
-      pendingBlendStepPercent,
+    const nextPendingRecipeResolution = normalizeRecipeResolution(
+      settings.pendingRecipeResolution ?? settings.pendingBlendStepPercent,
+      pendingRecipeResolution,
     );
-    const nextPendingBlendStep = normalizeBlendStepPercent(
-      pendingBlendStepFromFile,
-      appliedBlendStepPercent,
+    const nextAppliedRecipeResolution = normalizeRecipeResolution(
+      settings.appliedRecipeResolution ?? settings.appliedBlendStepPercent,
+      nextPendingRecipeResolution,
     );
-    const nextAppliedBlendStep = normalizeBlendStepPercent(
-      numberSetting(settings.appliedBlendStepPercent, pendingBlendStepFromFile),
-      nextPendingBlendStep,
+    const nextPendingColourAssignmentMode = isColourAssignmentMode(
+      settings.pendingColourAssignmentMode,
+    )
+      ? settings.pendingColourAssignmentMode
+      : "physical-and-virtual";
+    const nextAppliedColourAssignmentMode = isColourAssignmentMode(
+      settings.appliedColourAssignmentMode,
+    )
+      ? settings.appliedColourAssignmentMode
+      : nextPendingColourAssignmentMode;
+    const nextPendingMaxVirtualMixComponents = normalizeMaxVirtualMixComponents(
+      settings.pendingMaxVirtualMixComponents,
+      pendingMaxVirtualMixComponents,
+    );
+    const nextAppliedMaxVirtualMixComponents = normalizeMaxVirtualMixComponents(
+      settings.appliedMaxVirtualMixComponents,
+      nextPendingMaxVirtualMixComponents,
     );
     const nextPendingAccentProtection = isAccentProtectionMode(
       settings.pendingAccentProtection,
@@ -2908,8 +2984,12 @@ export default function App({
     setAppliedSuggestionExpertSettings(nextAppliedSuggestionExpertSettings);
     setPendingMaxColours(nextPendingMaxColours);
     setAppliedMaxColours(nextAppliedMaxColours);
-    setPendingBlendStepPercent(nextPendingBlendStep);
-    setAppliedBlendStepPercent(nextAppliedBlendStep);
+    setPendingRecipeResolution(nextPendingRecipeResolution);
+    setAppliedRecipeResolution(nextAppliedRecipeResolution);
+    setPendingColourAssignmentMode(nextPendingColourAssignmentMode);
+    setAppliedColourAssignmentMode(nextAppliedColourAssignmentMode);
+    setPendingMaxVirtualMixComponents(nextPendingMaxVirtualMixComponents);
+    setAppliedMaxVirtualMixComponents(nextAppliedMaxVirtualMixComponents);
     setPendingAccentProtection(nextPendingAccentProtection);
     setAppliedAccentProtection(nextAppliedAccentProtection);
     setPendingVirtualMixPriority(nextPendingVirtualMixPriority);
@@ -3277,7 +3357,9 @@ export default function App({
 
   const paletteDirty =
     pendingMaxColours !== appliedMaxColours ||
-    pendingBlendStepPercent !== appliedBlendStepPercent ||
+    pendingRecipeResolution !== appliedRecipeResolution ||
+    pendingColourAssignmentMode !== appliedColourAssignmentMode ||
+    pendingMaxVirtualMixComponents !== appliedMaxVirtualMixComponents ||
     pendingAccentProtection !== appliedAccentProtection ||
     pendingVirtualMixPriority !== appliedVirtualMixPriority ||
     pendingMappingStrategy !== appliedMappingStrategy ||
@@ -3290,9 +3372,16 @@ export default function App({
 
   function handleApplyPaletteSettings() {
     const next = normalizeMaxColours(pendingMaxColours);
-    const nextStep = normalizeBlendStepPercent(
-      pendingBlendStepPercent,
-      appliedBlendStepPercent,
+    const nextRecipeResolution = normalizeRecipeResolution(
+      pendingRecipeResolution,
+      appliedRecipeResolution,
+    );
+    const nextColourAssignmentMode = isColourAssignmentMode(pendingColourAssignmentMode)
+      ? pendingColourAssignmentMode
+      : "physical-and-virtual";
+    const nextMaxVirtualMixComponents = normalizeMaxVirtualMixComponents(
+      pendingMaxVirtualMixComponents,
+      appliedMaxVirtualMixComponents,
     );
     const nextAccentProtection = isAccentProtectionMode(pendingAccentProtection)
       ? pendingAccentProtection
@@ -3310,14 +3399,18 @@ export default function App({
       0,
     );
     setPendingMaxColours(next);
-    setPendingBlendStepPercent(nextStep);
+    setPendingRecipeResolution(nextRecipeResolution);
+    setPendingColourAssignmentMode(nextColourAssignmentMode);
+    setPendingMaxVirtualMixComponents(nextMaxVirtualMixComponents);
     setPendingAccentProtection(nextAccentProtection);
     setPendingVirtualMixPriority(nextVirtualMixPriority);
     setPendingMappingStrategy(nextMappingStrategy);
     setPendingVirtualPreviewLightness(nextVirtualPreviewLightness);
     if (!model) {
       setAppliedMaxColours(next);
-      setAppliedBlendStepPercent(nextStep);
+      setAppliedRecipeResolution(nextRecipeResolution);
+      setAppliedColourAssignmentMode(nextColourAssignmentMode);
+      setAppliedMaxVirtualMixComponents(nextMaxVirtualMixComponents);
       setAppliedAccentProtection(nextAccentProtection);
       setAppliedVirtualMixPriority(nextVirtualMixPriority);
       setAppliedMappingStrategy(nextMappingStrategy);
@@ -3336,7 +3429,9 @@ export default function App({
       setAssignmentOverrides({});
       setSelectedAssignmentKeys([]);
       setAppliedMaxColours(next);
-      setAppliedBlendStepPercent(nextStep);
+      setAppliedRecipeResolution(nextRecipeResolution);
+      setAppliedColourAssignmentMode(nextColourAssignmentMode);
+      setAppliedMaxVirtualMixComponents(nextMaxVirtualMixComponents);
       setAppliedAccentProtection(nextAccentProtection);
       setAppliedVirtualMixPriority(nextVirtualMixPriority);
       setAppliedMappingStrategy(nextMappingStrategy);
@@ -3346,7 +3441,9 @@ export default function App({
 
   function handleResetPaletteSettings() {
     setPendingMaxColours(appliedMaxColours);
-    setPendingBlendStepPercent(appliedBlendStepPercent);
+    setPendingRecipeResolution(appliedRecipeResolution);
+    setPendingColourAssignmentMode(appliedColourAssignmentMode);
+    setPendingMaxVirtualMixComponents(appliedMaxVirtualMixComponents);
     setPendingAccentProtection(appliedAccentProtection);
     setPendingVirtualMixPriority(appliedVirtualMixPriority);
     setPendingMappingStrategy(appliedMappingStrategy);
@@ -3471,10 +3568,10 @@ export default function App({
 
   const baseVirtualExtruderPlan = useMemo(() => {
     return buildVirtualExtruderPlan(palette, currentPhysicalSlots, {
-      maxComponents: 3,
+      maxComponents: appliedColourAssignmentMode === "physical-only" ? 1 : appliedMaxVirtualMixComponents,
       virtualStartId: physicalExtruders + 1,
       purePhysicalThreshold: 0.985,
-      ratioStepPercent: appliedBlendStepPercent,
+      recipeResolution: appliedRecipeResolution,
       accentProtection: appliedAccentProtection,
       mixPriority: appliedVirtualMixPriority,
       mappingStrategy: appliedMappingStrategy,
@@ -3484,7 +3581,9 @@ export default function App({
     currentPhysicalSlots,
     palette,
     physicalExtruders,
-    appliedBlendStepPercent,
+    appliedRecipeResolution,
+    appliedColourAssignmentMode,
+    appliedMaxVirtualMixComponents,
     appliedAccentProtection,
     appliedVirtualMixPriority,
     appliedMappingStrategy,
@@ -3904,7 +4003,8 @@ export default function App({
       suggestionOptions(
         suggestionMode,
         suggestionExpertSettings,
-        appliedBlendStepPercent,
+        appliedRecipeResolution,
+        appliedColourAssignmentMode === "physical-only" ? 1 : appliedMaxVirtualMixComponents,
       ),
     );
 
@@ -4570,24 +4670,65 @@ export default function App({
                     }
                   />
                 </label>
+                <label className="inline-row" title={t.tipColourAssignmentMode}>
+                  <HelpLabel title={t.tipColourAssignmentMode}>
+                    {t.colourAssignmentMode}
+                  </HelpLabel>
+                  <select
+                    value={pendingColourAssignmentMode}
+                    onChange={(e) =>
+                      setPendingColourAssignmentMode(
+                        isColourAssignmentMode(e.target.value)
+                          ? e.target.value
+                          : "physical-and-virtual",
+                      )
+                    }
+                  >
+                    <option value="physical-and-virtual">
+                      {t.assignmentPhysicalAndVirtual}
+                    </option>
+                    <option value="physical-only">{t.assignmentPhysicalOnly}</option>
+                  </select>
+                </label>
+                <label className="inline-row" title={t.tipMaxVirtualMixComponents}>
+                  <HelpLabel title={t.tipMaxVirtualMixComponents}>
+                    {t.maxVirtualMixComponents}
+                  </HelpLabel>
+                  <select
+                    value={pendingMaxVirtualMixComponents}
+                    disabled={pendingColourAssignmentMode === "physical-only"}
+                    onChange={(e) =>
+                      setPendingMaxVirtualMixComponents(
+                        normalizeMaxVirtualMixComponents(
+                          Number(e.target.value),
+                          pendingMaxVirtualMixComponents,
+                        ),
+                      )
+                    }
+                  >
+                    <option value={2}>{t.maxVirtualMixComponents2}</option>
+                    <option value={3}>{t.maxVirtualMixComponents3}</option>
+                  </select>
+                </label>
                 <label className="inline-row" title={t.tipBlendStepPercent}>
                   <HelpLabel title={t.tipBlendStepPercent}>
                     {t.blendStepPercent}
                   </HelpLabel>
                   <select
-                    value={pendingBlendStepPercent}
+                    value={pendingRecipeResolution}
+                    disabled={pendingColourAssignmentMode === "physical-only"}
                     onChange={(e) =>
-                      setPendingBlendStepPercent(
-                        normalizeBlendStepPercent(
-                          Number(e.target.value),
-                          pendingBlendStepPercent,
+                      setPendingRecipeResolution(
+                        normalizeRecipeResolution(
+                          e.target.value,
+                          pendingRecipeResolution,
                         ),
                       )
                     }
                   >
-                    {BLEND_STEP_OPTIONS.map((step) => (
-                      <option key={step} value={step}>
-                        {blendRecipeResolutionLabel(step)}
+                    {RECIPE_RESOLUTION_OPTIONS.map((resolution) => (
+                      <option key={resolution} value={resolution}>
+                        {recipeResolutionLabel(resolution)}
                       </option>
                     ))}
                   </select>

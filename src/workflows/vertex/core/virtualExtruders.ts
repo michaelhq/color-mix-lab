@@ -5,6 +5,7 @@ import type {
   RGB,
   VirtualMixPriorityMode,
   MappingStrategyMode,
+  MixingRecipeResolution,
 } from "./types";
 import { clamp255, rgbToHex, squaredDistance } from "./colour";
 import {
@@ -76,7 +77,8 @@ export interface VirtualExtruderPlanOptions {
   maxComponents: 1 | 2 | 3;
   virtualStartId: number;
   purePhysicalThreshold: number;
-  ratioStepPercent: number;
+  ratioStepPercent?: number;
+  recipeResolution?: MixingRecipeResolution;
   accentProtection: AccentProtectionMode;
   mixPriority: VirtualMixPriorityMode;
   mappingStrategy: MappingStrategyMode;
@@ -263,9 +265,29 @@ interface BlendCandidate {
   layerAverageRgb: RGB;
 }
 
-function stepPercentToUnits(ratioStepPercent: number): number {
-  const safeStep = Number.isFinite(ratioStepPercent) ? ratioStepPercent : 5;
-  return Math.max(1, Math.round(safeStep / BLEND_PERCENT_UNIT));
+function recipeResolutionFromLegacyStep(ratioStepPercent: number | undefined): MixingRecipeResolution {
+  const safeStep = Number.isFinite(ratioStepPercent) ? Number(ratioStepPercent) : 5;
+  if (safeStep === 10) return "grid10";
+  if (safeStep === 20) return "grid20";
+  if (safeStep === 25) return "grid25";
+  if (safeStep === 50) return "half-thirds";
+  return "grid5";
+}
+
+function stepUnitsForRecipeResolution(recipeResolution: MixingRecipeResolution): number | null {
+  switch (recipeResolution) {
+    case "grid10":
+      return 2;
+    case "grid20":
+      return 4;
+    case "grid25":
+      return 5;
+    case "grid5":
+      return 1;
+    case "thirds":
+    case "half-thirds":
+      return null;
+  }
 }
 
 function reducedCountKey(counts: number[]): string {
@@ -276,12 +298,10 @@ function reducedCountKey(counts: number[]): string {
 function buildUnitCountCompositions(
   parts: number,
   totalUnits: number,
-  stepUnits: number,
+  recipeResolution: MixingRecipeResolution,
 ): number[][] {
   if (parts <= 1) return [[1]];
 
-  const minUnits = Math.max(1, stepUnits);
-  const allowedOffGridComponents = totalUnits % stepUnits === 0 ? 0 : 1;
   const out: number[][] = [];
   const seen = new Set<string>();
   const addCounts = (counts: number[]) => {
@@ -291,6 +311,26 @@ function buildUnitCountCompositions(
     seen.add(key);
     out.push(counts);
   };
+
+  if (recipeResolution === "thirds") {
+    if (parts === 2) {
+      addCounts([1, 2]);
+      addCounts([2, 1]);
+    } else if (parts === 3) {
+      addCounts([1, 1, 1]);
+    }
+    return out;
+  }
+
+  if (recipeResolution === "half-thirds") {
+    if (parts === 2) addCounts([1, 1]);
+    else if (parts === 3) addCounts([1, 1, 1]);
+    return out;
+  }
+
+  const stepUnits = stepUnitsForRecipeResolution(recipeResolution) ?? 1;
+  const minUnits = Math.max(1, stepUnits);
+  const allowedOffGridComponents = totalUnits % stepUnits === 0 ? 0 : 1;
 
   const rec = (
     remainingParts: number,
@@ -313,13 +353,10 @@ function buildUnitCountCompositions(
 
   rec(parts, totalUnits, []);
 
-  // Equal thirds are the only non-5% Prusa-compatible special case. Keep them
-  // as integer counts so the layer sequence remains exactly 1:1:1 while the UI
-  // displays 33/33/33. Two-colour thirds are deliberately not generated; use
-  // the nearest 5% recipes such as 35/65 or 65/35 instead.
-  if (parts === 3) {
-    addCounts([1, 1, 1]);
-  }
+  // Equal thirds are the only non-grid special case kept for all grid modes.
+  // It stays as the exact 1:1:1 recipe so the printable sequence is not rounded
+  // to a 5% percentage representation.
+  if (parts === 3) addCounts([1, 1, 1]);
 
   return out;
 }
@@ -327,17 +364,16 @@ function buildUnitCountCompositions(
 function makeBlendCandidates(
   slots: PhysicalSlot[],
   maxComponents: 1 | 2 | 3,
-  ratioStepPercent: number,
+  recipeResolution: MixingRecipeResolution,
 ): BlendCandidate[] {
   const candidates = slots.filter((slot) => slot.slot >= 1 && slot.slot <= 8);
   if (candidates.length === 0) return [];
   const totalUnits = BLEND_TOTAL_UNITS;
-  const stepUnits = stepPercentToUnits(ratioStepPercent);
   const out: BlendCandidate[] = [];
   const maxSize = Math.min(maxComponents, candidates.length) as 1 | 2 | 3;
 
   for (let size = 1; size <= maxSize; size++) {
-    const countSets = buildUnitCountCompositions(size, totalUnits, stepUnits);
+    const countSets = buildUnitCountCompositions(size, totalUnits, recipeResolution);
     for (const subset of combinations(candidates, size)) {
       for (const unitCounts of countSets) {
         const totalCount = Math.max(
@@ -680,7 +716,8 @@ export function buildVirtualExtruderPlan(
     maxComponents: options.maxComponents ?? 3,
     virtualStartId: options.virtualStartId ?? 6,
     purePhysicalThreshold: options.purePhysicalThreshold ?? 0.985,
-    ratioStepPercent: options.ratioStepPercent ?? 5,
+    ratioStepPercent: options.ratioStepPercent,
+    recipeResolution: options.recipeResolution ?? recipeResolutionFromLegacyStep(options.ratioStepPercent),
     accentProtection: options.accentProtection ?? "balanced",
     mixPriority: options.mixPriority ?? "accurate",
     mappingStrategy: options.mappingStrategy ?? "closest",
@@ -713,7 +750,7 @@ export function buildVirtualExtruderPlan(
   const blendCandidates = makeBlendCandidates(
     physicalSlots,
     opts.maxComponents,
-    opts.ratioStepPercent,
+    opts.recipeResolution ?? recipeResolutionFromLegacyStep(opts.ratioStepPercent),
   );
   const totalPaletteWeight = Math.max(
     1,

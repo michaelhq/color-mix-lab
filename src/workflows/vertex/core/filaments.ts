@@ -1,4 +1,4 @@
-import type { Filament, PaletteEntry, PhysicalSlot, RGB } from './types';
+import type { Filament, MixingRecipeResolution, PaletteEntry, PhysicalSlot, RGB } from './types';
 import { effectiveRgbFromRgba, luminance, parseHexColour, rgbToHex, saturation, squaredDistance } from './colour';
 
 export function parseFilamentList(text: string, alphaBackground: RGB = [255, 255, 255]): Filament[] {
@@ -179,7 +179,8 @@ export interface SuggestionOptions {
   weightExponent: number;
   neutralWeight: number;
   maxComponents: 1 | 2 | 3;
-  ratioStepPercent: number;
+  ratioStepPercent?: number;
+  recipeResolution?: MixingRecipeResolution;
 }
 
 function combinations<T>(items: T[], size: number): T[][] {
@@ -256,19 +257,38 @@ function constrainedMixForSubset(target: [number, number, number], subset: Filam
 const BLEND_PERCENT_UNIT = 5;
 const BLEND_TOTAL_UNITS = Math.round(100 / BLEND_PERCENT_UNIT);
 
-function stepPercentToUnits(stepPercent: number): number {
-  const safeStep = Number.isFinite(stepPercent) ? stepPercent : 5;
-  return Math.max(1, Math.round(safeStep / BLEND_PERCENT_UNIT));
+function recipeResolutionFromLegacyStep(stepPercent: number | undefined): MixingRecipeResolution {
+  const safeStep = Number.isFinite(stepPercent) ? Number(stepPercent) : 5;
+  if (safeStep === 10) return "grid10";
+  if (safeStep === 20) return "grid20";
+  if (safeStep === 25) return "grid25";
+  if (safeStep === 50) return "half-thirds";
+  return "grid5";
+}
+
+function stepUnitsForRecipeResolution(recipeResolution: MixingRecipeResolution): number | null {
+  switch (recipeResolution) {
+    case "grid10":
+      return 2;
+    case "grid20":
+      return 4;
+    case "grid25":
+      return 5;
+    case "grid5":
+      return 1;
+    case "thirds":
+    case "half-thirds":
+      return null;
+  }
 }
 
 const snappingCompositionCache = new Map<string, number[][]>();
 
-function buildSnappingCompositions(parts: number, totalUnits: number, stepUnits: number): number[][] {
-  const cacheKey = `${parts}|${totalUnits}|${stepUnits}`;
+function buildSnappingCompositions(parts: number, totalUnits: number, recipeResolution: MixingRecipeResolution): number[][] {
+  const cacheKey = `${parts}|${totalUnits}|${recipeResolution}`;
   const cached = snappingCompositionCache.get(cacheKey);
   if (cached) return cached;
 
-  const allowedOffGridComponents = totalUnits % stepUnits === 0 ? 0 : 1;
   const out: number[][] = [];
   const seen = new Set<string>();
   const addCounts = (counts: number[]) => {
@@ -291,6 +311,27 @@ function buildSnappingCompositions(parts: number, totalUnits: number, stepUnits:
     out.push(counts);
   };
 
+  if (recipeResolution === "thirds") {
+    if (parts === 1) addCounts([1]);
+    else if (parts === 2) {
+      addCounts([1, 2]);
+      addCounts([2, 1]);
+    } else if (parts === 3) addCounts([1, 1, 1]);
+    snappingCompositionCache.set(cacheKey, out);
+    return out;
+  }
+
+  if (recipeResolution === "half-thirds") {
+    if (parts === 1) addCounts([1]);
+    else if (parts === 2) addCounts([1, 1]);
+    else if (parts === 3) addCounts([1, 1, 1]);
+    snappingCompositionCache.set(cacheKey, out);
+    return out;
+  }
+
+  const stepUnits = stepUnitsForRecipeResolution(recipeResolution) ?? 1;
+  const allowedOffGridComponents = totalUnits % stepUnits === 0 ? 0 : 1;
+
   const rec = (remainingParts: number, remainingUnits: number, current: number[]) => {
     if (remainingParts === 1) {
       const counts = [...current, remainingUnits];
@@ -308,14 +349,7 @@ function buildSnappingCompositions(parts: number, totalUnits: number, stepUnits:
   };
 
   rec(parts, totalUnits, []);
-
-  // Keep filament suggestions aligned with the virtual-extruder planner: all
-  // printable recipes use 5% steps, except the equal three-colour 1:1:1 recipe.
-  // Two-colour thirds are not PrusaSlicer-style UI recipes; nearby 35/65 and
-  // 65/35 mixes are evaluated by the 5% grid.
-  if (parts === 3) {
-    addCounts([1, 1, 1]);
-  }
+  if (parts === 3) addCounts([1, 1, 1]);
 
   snappingCompositionCache.set(cacheKey, out);
   return out;
@@ -341,11 +375,11 @@ function subsetScoreKey(subset: Filament[], cache: FilamentSuggestionScoreCache)
     .join('+');
 }
 
-function snapRatiosToStep(weights: number[], stepPercent: number): number[] {
+function snapRatiosToStep(weights: number[], opts: SuggestionOptions): number[] {
   const totalUnits = BLEND_TOTAL_UNITS;
-  const stepUnits = stepPercentToUnits(stepPercent);
+  const recipeResolution = opts.recipeResolution ?? recipeResolutionFromLegacyStep(opts.ratioStepPercent);
   const raw = weights.map(w => Math.max(0, w) * totalUnits);
-  const compositions = buildSnappingCompositions(weights.length, totalUnits, stepUnits);
+  const compositions = buildSnappingCompositions(weights.length, totalUnits, recipeResolution);
 
   let best = compositions[0] ?? raw.map(() => 0);
   let bestScore = Number.POSITIVE_INFINITY;
@@ -396,7 +430,7 @@ function scoreMixSubset(
   opts: SuggestionOptions,
   cache?: FilamentSuggestionScoreCache,
 ): { score: number; rgbError: number; satPenalty: number } | null {
-  const cacheKey = cache ? `${paletteScoreKey(targetRgb)}|${opts.ratioStepPercent}|${opts.saturationPenalty}|${subsetScoreKey(subset, cache)}` : '';
+  const cacheKey = cache ? `${paletteScoreKey(targetRgb)}|${opts.recipeResolution ?? opts.ratioStepPercent}|${opts.saturationPenalty}|${subsetScoreKey(subset, cache)}` : '';
   if (cache) {
     const cached = cache.mixScores.get(cacheKey);
     if (cached) return cached;
@@ -406,7 +440,7 @@ function scoreMixSubset(
   const targetSat = saturation(targetRgb);
   const weights = constrainedMixForSubset(target, subset);
   if (!weights) return null;
-  const snapped = snapRatiosToStep(weights, opts.ratioStepPercent);
+  const snapped = snapRatiosToStep(weights, opts);
   const activeSubset: Filament[] = [];
   const activeWeights: number[] = [];
   snapped.forEach((w, i) => {

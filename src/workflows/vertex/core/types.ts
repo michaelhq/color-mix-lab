@@ -5,6 +5,8 @@ export type Tri = [number, number, number];
 export type AccentProtectionMode = 'off' | 'balanced' | 'strong';
 export type VirtualMixPriorityMode = 'accurate' | 'preserve-hue' | 'avoid-muddy';
 export type MappingStrategyMode = 'closest' | 'smooth' | 'preserve-hue' | 'preserve-accent';
+export type ColourAssignmentMode = 'physical-only' | 'physical-and-virtual';
+export type MixingRecipeResolution = 'grid5' | 'grid10' | 'grid20' | 'grid25' | 'thirds' | 'half-thirds';
 
 export interface MeshModel {
   name: string;
