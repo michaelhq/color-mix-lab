@@ -253,6 +253,53 @@ function effectiveRgbFromCounts(
   ) as RGB;
 }
 
+function isWarmBrownOrangeRustTarget(lab: LAB): boolean {
+  const chroma = labChroma(lab);
+  const hue = labHueDegrees(lab);
+  return chroma >= 8 && lab.a >= 3 && lab.b >= 6 && hue >= 22 && hue <= 82;
+}
+
+function isGreenOliveCandidate(lab: LAB): boolean {
+  const chroma = labChroma(lab);
+  const hue = labHueDegrees(lab);
+  return chroma >= 5 && lab.b > -4 && (lab.a < 1 || (hue >= 76 && hue <= 150));
+}
+
+function warmNeutralGuardPenalty(
+  targetLab: LAB,
+  candidateLab: LAB,
+  hueGap: number,
+): number {
+  const targetChroma = labChroma(targetLab);
+  const candidateChroma = labChroma(candidateLab);
+  const lightnessGap = Math.abs(candidateLab.L - targetLab.L);
+  let penalty = 0;
+
+  if (isWarmBrownOrangeRustTarget(targetLab)) {
+    const redGreenDrift = Math.max(0, targetLab.a - candidateLab.a);
+    const candidateIsOlive = isGreenOliveCandidate(candidateLab);
+    if (candidateIsOlive) penalty += 4.5;
+    if (redGreenDrift > 6) penalty += (redGreenDrift - 6) * 0.55;
+    if (hueGap > 18) penalty += (hueGap - 18) * 0.26;
+    if (candidateChroma < targetChroma * 0.45)
+      penalty += (targetChroma * 0.45 - candidateChroma) * 0.14;
+  }
+
+  if (targetChroma <= 16) {
+    const chromaOvershoot = Math.max(0, candidateChroma - (targetChroma + 7));
+    const chromaGap = Math.abs(candidateChroma - targetChroma);
+    if (lightnessGap > 7) penalty += (lightnessGap - 7) * 0.42;
+    if (chromaOvershoot > 0) penalty += chromaOvershoot * 0.30;
+    if (chromaGap > 12) penalty += (chromaGap - 12) * 0.14;
+    if (Math.abs(candidateLab.a) > Math.abs(targetLab.a) + 9)
+      penalty += (Math.abs(candidateLab.a) - Math.abs(targetLab.a) - 9) * 0.20;
+    if (Math.abs(candidateLab.b) > Math.abs(targetLab.b) + 11)
+      penalty += (Math.abs(candidateLab.b) - Math.abs(targetLab.b) - 11) * 0.16;
+  }
+
+  return penalty;
+}
+
 interface BlendCandidate {
   subset: PhysicalSlot[];
   ratios: number[];
@@ -481,6 +528,12 @@ function candidateScore(
     // less over-saturated candidates when several matches are otherwise close.
     if (candidateChroma > targetChroma * 1.35)
       score += (candidateChroma - targetChroma * 1.35) * 0.08;
+  } else if (mappingStrategy === "warm-neutral") {
+    // Browser-visible print simulation is especially sensitive to brown,
+    // orange, skin and rust targets being mapped to green/olive mixtures.
+    // Low-chroma colours also need tighter lightness/neutrality control than
+    // plain DeltaE gives them in this palette-mapping context.
+    score += warmNeutralGuardPenalty(targetLab, candidateLab, hueGap);
   }
 
   const tinyComponentPenalty = candidate.ratios.filter((r) => r > 0 && r < 0.08).length * 0.08;
@@ -519,6 +572,7 @@ function bestBlendForColour(
   fdmLab: LAB;
   layerAverageRgb: RGB;
   error: number;
+  diagnosticError: number;
 } | null {
   if (candidates.length === 0) return null;
   const targetLab = rgbToLab(targetRgb);
@@ -564,6 +618,7 @@ function bestBlendForColour(
     fdmLab: best.fdmLab,
     layerAverageRgb: best.layerAverageRgb,
     error: best.error,
+    diagnosticError: best.score,
   };
 }
 
@@ -775,7 +830,7 @@ export function buildVirtualExtruderPlan(
       previousSmoothLab,
     );
     if (!best) continue;
-    mappingErrors.push({ error: best.error, weight: Math.max(1, p.count) });
+    mappingErrors.push({ error: best.diagnosticError, weight: Math.max(1, p.count) });
     if (opts.mappingStrategy === "smooth") previousSmoothLab = best.fdmLab;
 
     const active = best.active;

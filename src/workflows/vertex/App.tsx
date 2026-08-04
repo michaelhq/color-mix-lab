@@ -422,7 +422,8 @@ function isMappingStrategyMode(value: unknown): value is MappingStrategyMode {
     value === "closest" ||
     value === "smooth" ||
     value === "preserve-hue" ||
-    value === "preserve-accent"
+    value === "preserve-accent" ||
+    value === "warm-neutral"
   );
 }
 
@@ -4794,6 +4795,7 @@ export default function App({
                   >
                     <option value="closest">{t.mappingClosest}</option>
                     <option value="smooth">{t.mappingSmooth}</option>
+                    <option value="warm-neutral">{t.mappingWarmNeutral}</option>
                     <option value="preserve-hue">{t.mappingHuePreserving}</option>
                     <option value="preserve-accent">
                       {t.mappingAccentPreserving}

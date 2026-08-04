@@ -68,6 +68,7 @@ const en: Dict = {
   mappingStrategy: "Mapping strategy",
   mappingClosest: "Closest match",
   mappingSmooth: "Smooth transitions",
+  mappingWarmNeutral: "Warm/neutral-preserving",
   mappingHuePreserving: "Hue-preserving",
   mappingAccentPreserving: "Accent-preserving",
   virtualPreviewLightness: "Virtual preview brightness",
@@ -342,7 +343,7 @@ const en: Dict = {
   tipVirtualMixPriority:
     "Controls the colour model and conservative hue/accent guards used while selecting printable virtual mixtures. The calibrated Prusa FDM mixer remains the base model instead of a simple RGB layer average.",
   tipMappingStrategy:
-    "Controls how reduced target-palette colours are mapped to printable physical or virtual blends. Closest match minimizes individual colour error. Smooth transitions favours more continuous printable colours between neighbouring target tones. Hue-preserving penalizes wrong hue direction. Accent-preserving protects small saturated target colours during mapping.",
+    "Controls how reduced target-palette colours are mapped to printable physical or virtual blends. Closest match minimizes individual colour error. Smooth transitions favours more continuous printable colours between neighbouring target tones. Warm/neutral-preserving penalizes green/olive drift for brown, orange, skin and rust tones and keeps low-saturation colours closer in lightness and neutrality. Hue-preserving penalizes wrong hue direction. Accent-preserving protects small saturated target colours during mapping.",
   tipVirtualPreviewLightness:
     "Adjusts only the displayed virtual-mix and print-simulation brightness. It does not change the reduced target palette, layer sequences or 3MF export. Darker modes now apply a stronger LAB lightness reduction because calibrated FDM prediction can appear too light in the browser preview.",
   tipPhysicalExtruders:
