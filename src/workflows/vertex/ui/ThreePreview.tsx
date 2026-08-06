@@ -14,6 +14,12 @@ import type {
   RGB,
 } from "../core/types";
 import { nearestPaletteIndex } from "../core/quantize";
+import {
+  addSharedPreviewLights,
+  configurePreviewRenderer,
+  makeVertexColourPreviewMaterial,
+  type PreviewDisplayMode,
+} from "../../common/previewRendering";
 
 type View = "front" | "back" | "left" | "right" | "top" | "bottom";
 
@@ -36,7 +42,6 @@ interface AxisGuideGeometry {
   labels: Record<AxisLabelKey, THREE.Vector3>;
 }
 type PreviewBackground = "light" | "dark";
-type PreviewDisplayMode = "shaded" | "flat";
 type PreviewMode = "adjusted" | "quantized" | "print";
 type WebglLodMode = "off" | "tiny" | "small" | "medium";
 
@@ -79,6 +84,13 @@ export interface ThreePreviewHandle {
   fitToModel: () => void;
 }
 
+export interface CameraSyncState {
+  sourceId: string;
+  position: [number, number, number];
+  target: [number, number, number];
+  zoom: number;
+}
+
 interface ThreePreviewProps {
   model: MeshModel | null;
   adjustedColors: RGB[];
@@ -95,6 +107,10 @@ interface ThreePreviewProps {
   lodMode?: WebglLodMode;
   maxPreviewTriangles?: number;
   onBusyChange?: (busy: boolean) => void;
+  syncId?: string;
+  syncEnabled?: boolean;
+  syncState?: CameraSyncState | null;
+  onSyncChange?: (state: CameraSyncState) => void;
   emptyLabel?: string;
   busyLabel?: string;
 }
@@ -322,25 +338,20 @@ function makeMaterial(
   displayMode: PreviewDisplayMode,
   wireframe: boolean,
 ): THREE.Material {
-  if (displayMode === "flat") {
-    return new THREE.MeshBasicMaterial({
-      vertexColors: true,
-      side: THREE.DoubleSide,
-      wireframe,
-    });
-  }
+  return makeVertexColourPreviewMaterial(displayMode, wireframe);
+}
 
-  const material = new THREE.MeshLambertMaterial({
-    vertexColors: true,
-    side: THREE.DoubleSide,
-    flatShading: false,
-    wireframe,
-  });
-  // The shaded mode is an editor-style preview. Keep the underlying vertex
-  // colours unchanged and brighten only the lighted material response so it is
-  // closer to the PrusaSlicer editor view.
-  material.color.setScalar(1.08);
-  return material;
+function buildCameraSyncState(
+  syncId: string,
+  camera: THREE.PerspectiveCamera,
+  controls: OrbitControls,
+): CameraSyncState {
+  return {
+    sourceId: syncId,
+    position: [camera.position.x, camera.position.y, camera.position.z],
+    target: [controls.target.x, controls.target.y, controls.target.z],
+    zoom: camera.zoom,
+  };
 }
 
 function cameraPositionForView(view: View, distance: number): THREE.Vector3 {
@@ -573,6 +584,10 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
       maxPreviewTriangles = DEFAULT_MAX_WEBGL_PREVIEW_TRIANGLES,
       accentProtection = "balanced",
       onBusyChange,
+      syncId = "preview",
+      syncEnabled = false,
+      syncState = null,
+      onSyncChange,
       emptyLabel = "No model loaded.",
       busyLabel = "Building preview...",
     },
@@ -587,6 +602,10 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
     const axesRef = useRef<THREE.LineSegments | null>(null);
     const axisLabelRefs = useRef<AxisLabelRefs>({});
     const showAxisLabelsRef = useRef(showAxisLabels);
+    const syncEnabledRef = useRef(syncEnabled);
+    const onSyncChangeRef = useRef(onSyncChange);
+    const applyingExternalSyncRef = useRef(false);
+    const pendingSyncEmitRef = useRef<number | null>(null);
     const frameRef = useRef<number | null>(null);
     const requestIdRef = useRef(0);
     const geometryRef = useRef<THREE.BufferGeometry | null>(null);
@@ -611,6 +630,14 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
     }
 
     useEffect(() => {
+      syncEnabledRef.current = syncEnabled;
+    }, [syncEnabled]);
+
+    useEffect(() => {
+      onSyncChangeRef.current = onSyncChange;
+    }, [onSyncChange]);
+
+    useEffect(() => {
       showAxisLabelsRef.current = showAxisLabels;
       if (!showAxisLabels) hideAxisLabelElements(axisLabelRefs.current);
     }, [showAxisLabels]);
@@ -630,6 +657,30 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
       effectivePaletteRgbByIndex,
       accentProtection,
     ]);
+
+    useEffect(() => {
+      const camera = cameraRef.current;
+      const controls = controlsRef.current;
+      if (
+        !camera ||
+        !controls ||
+        !syncEnabled ||
+        !syncState ||
+        syncState.sourceId === syncId
+      )
+        return;
+
+      applyingExternalSyncRef.current = true;
+      camera.position.set(...syncState.position);
+      camera.zoom = syncState.zoom;
+      camera.updateProjectionMatrix();
+      controls.target.set(...syncState.target);
+      controls.update();
+
+      window.requestAnimationFrame(() => {
+        applyingExternalSyncRef.current = false;
+      });
+    }, [syncEnabled, syncId, syncState]);
 
     function resetView(nextView: View = view) {
       const camera = cameraRef.current;
@@ -708,24 +759,45 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
         alpha: false,
         powerPreference: "high-performance",
       });
-      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      configurePreviewRenderer(renderer);
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
       mount.appendChild(renderer.domElement);
       rendererRef.current = renderer;
 
-      scene.add(new THREE.AmbientLight(0xffffff, 0.92));
-      const keyLight = new THREE.DirectionalLight(0xffffff, 0.66);
-      keyLight.position.set(2, -3, 4);
-      scene.add(keyLight);
-      const fillLight = new THREE.DirectionalLight(0xffffff, 0.26);
-      fillLight.position.set(-2, 2, 2);
-      scene.add(fillLight);
+      addSharedPreviewLights(scene, "printerZUp");
 
       const controls = new OrbitControls(camera, renderer.domElement);
       controls.enableDamping = true;
       controls.dampingFactor = 0.08;
       controls.screenSpacePanning = true;
       controlsRef.current = controls;
+
+      const emitSyncState = () => {
+        if (
+          !syncEnabledRef.current ||
+          !onSyncChangeRef.current ||
+          applyingExternalSyncRef.current
+        )
+          return;
+        if (pendingSyncEmitRef.current !== null) return;
+        pendingSyncEmitRef.current = window.requestAnimationFrame(() => {
+          pendingSyncEmitRef.current = null;
+          const currentCamera = cameraRef.current;
+          const currentControls = controlsRef.current;
+          if (
+            !currentCamera ||
+            !currentControls ||
+            !syncEnabledRef.current ||
+            !onSyncChangeRef.current ||
+            applyingExternalSyncRef.current
+          )
+            return;
+          onSyncChangeRef.current(
+            buildCameraSyncState(syncId, currentCamera, currentControls),
+          );
+        });
+      };
+      controls.addEventListener("change", emitSyncState);
 
       const resize = () => {
         const width = Math.max(320, mount.clientWidth);
@@ -754,6 +826,11 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
 
       return () => {
         if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+        if (pendingSyncEmitRef.current !== null) {
+          cancelAnimationFrame(pendingSyncEmitRef.current);
+          pendingSyncEmitRef.current = null;
+        }
+        controls.removeEventListener("change", emitSyncState);
         if (colorUpdateTimerRef.current !== null)
           window.clearTimeout(colorUpdateTimerRef.current);
         if (materialUpdateTimerRef.current !== null)

@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { makeVertexColourPreviewMaterial } from "../../common/previewRendering";
 
 export interface BakedColorEntry {
   hex: string;
@@ -1009,13 +1010,7 @@ function pushBakeVertex(
 }
 
 function createBakedMaterial(): THREE.Material {
-  return new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    color: 0xffffff,
-    roughness: 0.78,
-    metalness: 0,
-    side: THREE.DoubleSide,
-  });
+  return makeVertexColourPreviewMaterial("shaded", false);
 }
 
 function midVertex(a: BakeVertex, b: BakeVertex): BakeVertex {

@@ -130,6 +130,8 @@ const en: Dict = {
   adjusted: "Adjusted colours",
   quantized: "Reduced palette",
   printSimulation: "Print simulation",
+  splitView: "Split view",
+  syncViews: "Sync",
   display: "Display",
   shaded: "Shaded",
   flatColour: "Flat colour",
@@ -390,7 +392,11 @@ const en: Dict = {
   tipView:
     "Sets the camera to a standard viewing direction: front, back, left, right, top or bottom.",
   tipPreviewMode:
-    "Adjusted colours shows the colour-corrected source colours before palette reduction. Reduced palette shows the target palette colours before physical filament mixing. Print simulation shows the effective colours after physical extruder and layer-sequence mapping. The mode affects the WebGL preview.",
+    "Adjusted colours shows the colour-corrected source colours before palette reduction. Reduced palette shows the target palette colours before physical filament mixing. In split view this selector controls the left preview; the right preview remains fixed to Print simulation.",
+  tipSplitView:
+    "Shows Adjusted colours or Reduced palette on the left and a fixed Print simulation on the right. Disable it to use the original single preview.",
+  tipSyncViews:
+    "Synchronizes rotation, pan and zoom between the two split previews. Disable it to inspect both views independently.",
   tipDisplayMode:
     "Shaded uses lighting and normals for a more realistic 3D view. Flat colour shows the triangle colours without lighting influence.",
   tipBackground:

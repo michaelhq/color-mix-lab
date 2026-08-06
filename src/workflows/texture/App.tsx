@@ -32,6 +32,7 @@ import { exportBakedSceneToVertexColorObj } from "./core/exportObj";
 import { downloadBlob } from "./core/zipDownload";
 import { extractSupportedModelFilesFromZip } from "./core/readZip";
 import ModelPreview, { type CameraSyncState } from "./ui/ModelPreview";
+import type { PreviewDisplayMode } from "../common/previewRendering";
 import {
   composeOrientationMatrices,
   IDENTITY_ORIENTATION_MATRIX,
@@ -64,6 +65,10 @@ type TranslationKey =
   | "bakingExportTitle"
   | "basis"
   | "preview"
+  | "display"
+  | "displayModeTip"
+  | "shaded"
+  | "flatColour"
   | "subdivision"
   | "export"
   | "advancedOptions"
@@ -242,6 +247,11 @@ const I18N: Record<UiLanguage, Record<TranslationKey, string>> = {
     bakingExportTitle: "2. Baking and export",
     basis: "Basics",
     preview: "Preview",
+    display: "Display",
+    displayModeTip:
+      "Shaded uses the shared Color Mix Lab lighting setup. Flat colour shows the model colours without lighting influence.",
+    shaded: "Shaded",
+    flatColour: "Flat colour",
     subdivision: "Subdivision",
     export: "Export",
     advancedOptions: "Advanced options",
@@ -1481,6 +1491,8 @@ export default function App({
   const [showAxes, setShowAxes] = useState(false);
   const [syncPreviews, setSyncPreviews] = useState(true);
   const [previewView, setPreviewView] = useState<TexturePreviewView>("front");
+  const [previewDisplayMode, setPreviewDisplayMode] =
+    useState<PreviewDisplayMode>("shaded");
   const [previewBackground, setPreviewBackground] =
     useState<TexturePreviewBackground>("auto");
   const [previewFitSignal, setPreviewFitSignal] = useState(0);
@@ -1867,6 +1879,7 @@ export default function App({
       maxSubdivisionDepth,
       exportScale,
       previewView,
+      previewDisplayMode,
       previewBackground,
       wireframe,
       showAxes,
@@ -1964,6 +1977,11 @@ export default function App({
       settings.previewView === "bottom"
     )
       setPreviewView(settings.previewView);
+    if (
+      settings.previewDisplayMode === "shaded" ||
+      settings.previewDisplayMode === "flat"
+    )
+      setPreviewDisplayMode(settings.previewDisplayMode);
     if (
       settings.previewBackground === "auto" ||
       settings.previewBackground === "light" ||
@@ -3710,6 +3728,40 @@ export default function App({
             <div className="preview-toolbar preview-toolbar-merged">
               <div className="preview-toolbar-main">
                 <div className="preview-control-row">
+                  <label title={t("displayModeTip")}>
+                    <InfoLabel tip={t("displayModeTip")}>
+                      {t("display")}
+                    </InfoLabel>
+                    <select
+                      value={previewDisplayMode}
+                      disabled={!hasAnyPreviewModel}
+                      onChange={(event) =>
+                        setPreviewDisplayMode(
+                          event.currentTarget.value as PreviewDisplayMode,
+                        )
+                      }
+                    >
+                      <option value="shaded">{t("shaded")}</option>
+                      <option value="flat">{t("flatColour")}</option>
+                    </select>
+                  </label>
+                  <label title="Sets the preview background independently from the UI theme.">
+                    <InfoLabel tip="Sets the preview background independently from the UI theme.">
+                      Background
+                    </InfoLabel>
+                    <select
+                      value={previewBackground}
+                      onChange={(event) =>
+                        setPreviewBackground(
+                          event.currentTarget.value as TexturePreviewBackground,
+                        )
+                      }
+                    >
+                      <option value="auto">GUI theme</option>
+                      <option value="light">Light</option>
+                      <option value="dark">Dark</option>
+                    </select>
+                  </label>
                   <label>
                     <InfoLabel tip={t("viewTip")}>{t("view")}</InfoLabel>
                     <select
@@ -3729,23 +3781,6 @@ export default function App({
                       <option value="back">Back</option>
                       <option value="top">Top</option>
                       <option value="bottom">Bottom</option>
-                    </select>
-                  </label>
-                  <label title="Sets the preview background independently from the UI theme.">
-                    <InfoLabel tip="Sets the preview background independently from the UI theme.">
-                      Background
-                    </InfoLabel>
-                    <select
-                      value={previewBackground}
-                      onChange={(event) =>
-                        setPreviewBackground(
-                          event.currentTarget.value as TexturePreviewBackground,
-                        )
-                      }
-                    >
-                      <option value="auto">GUI theme</option>
-                      <option value="light">Light</option>
-                      <option value="dark">Dark</option>
                     </select>
                   </label>
                   <label>
@@ -3818,8 +3853,9 @@ export default function App({
                     {t("originalPreview")}
                   </div>
                   <ModelPreview
-                    key={`original-${previewRebuildKey}-${previewBackground}`}
+                    key={`original-${previewRebuildKey}`}
                     scene={scene}
+                    displayMode={previewDisplayMode}
                     wireframe={wireframe}
                     showAxes={showAxes || showOrientationAxisGuide}
                     showAxisLabels={showOrientationAxisGuide}
@@ -3839,8 +3875,9 @@ export default function App({
                 <div className="preview-cell">
                   <div className="preview-cell-title">{t("bakedPreview")}</div>
                   <ModelPreview
-                    key={`baked-${previewRebuildKey}-${previewBackground}`}
+                    key={`baked-${previewRebuildKey}`}
                     scene={bakedScene}
+                    displayMode={previewDisplayMode}
                     wireframe={wireframe}
                     showAxes={showAxes || showOrientationAxisGuide}
                     showAxisLabels={showOrientationAxisGuide}

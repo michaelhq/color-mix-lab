@@ -2,6 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { applyTextureColourCorrection, type TextureColourCorrection } from "../core/textureBake";
+import {
+  addSharedPreviewLights,
+  configurePreviewRenderer,
+  makeFlatPreviewMaterial,
+  type PreviewDisplayMode,
+} from "../../common/previewRendering";
 
 export interface CameraSyncState {
   sourceId: string;
@@ -82,6 +88,7 @@ interface ModelPreviewProps {
   syncState?: CameraSyncState | null;
   onSyncChange?: (state: CameraSyncState) => void;
   colourCorrection?: TextureColourCorrection | null;
+  displayMode?: PreviewDisplayMode;
 }
 
 
@@ -204,6 +211,63 @@ function applyPreviewColourCorrection(root: THREE.Object3D, correction: TextureC
     if (Array.isArray(object.material)) object.material = object.material.map(assignMaterial);
     else if (object.material) object.material = assignMaterial(object.material);
   });
+}
+
+type PreviewMaterialSet = THREE.Material | THREE.Material[];
+
+interface PreviewMaterialVariant {
+  mesh: THREE.Mesh;
+  shaded: PreviewMaterialSet;
+  flat: PreviewMaterialSet;
+}
+
+function buildPreviewMaterialVariants(
+  root: THREE.Object3D,
+): PreviewMaterialVariant[] {
+  const flatMaterialCache = new Map<THREE.Material, THREE.Material>();
+  const variants: PreviewMaterialVariant[] = [];
+
+  const flatMaterial = (material: THREE.Material): THREE.Material => {
+    const cached = flatMaterialCache.get(material);
+    if (cached) return cached;
+    const flat = makeFlatPreviewMaterial(material);
+    flatMaterialCache.set(material, flat);
+    return flat;
+  };
+
+  root.traverse((object) => {
+    if (!(object instanceof THREE.Mesh)) return;
+    const shaded = object.material;
+    const flat = Array.isArray(shaded)
+      ? shaded.map(flatMaterial)
+      : flatMaterial(shaded);
+    variants.push({ mesh: object, shaded, flat });
+  });
+
+  return variants;
+}
+
+function applyDisplayMode(
+  variants: PreviewMaterialVariant[],
+  displayMode: PreviewDisplayMode,
+): void {
+  for (const variant of variants) {
+    variant.mesh.material = displayMode === "flat" ? variant.flat : variant.shaded;
+  }
+}
+
+function disposeFlatPreviewMaterials(variants: PreviewMaterialVariant[]): void {
+  const disposed = new Set<THREE.Material>();
+  for (const variant of variants) {
+    const flatMaterials = Array.isArray(variant.flat)
+      ? variant.flat
+      : [variant.flat];
+    for (const material of flatMaterials) {
+      if (disposed.has(material)) continue;
+      disposed.add(material);
+      material.dispose();
+    }
+  }
 }
 
 function buildCameraSyncState(
@@ -556,6 +620,7 @@ export default function ModelPreview({
   syncState = null,
   onSyncChange,
   colourCorrection = null,
+  displayMode = "shaded",
 }: ModelPreviewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -565,8 +630,11 @@ export default function ModelPreview({
   const applyingExternalSyncRef = useRef(false);
   const pendingEmitRef = useRef<number | null>(null);
   const wireframeTimerRef = useRef<number | null>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const threeSceneRef = useRef<THREE.Scene | null>(null);
   const modelRootRef = useRef<THREE.Object3D | null>(null);
+  const materialVariantsRef = useRef<PreviewMaterialVariant[]>([]);
+  const displayModeRef = useRef<PreviewDisplayMode>(displayMode);
   const axesRef = useRef<THREE.LineSegments | null>(null);
   const axisLabelRefs = useRef<AxisLabelRefs>({});
   const showAxisLabelsRef = useRef(showAxisLabels);
@@ -589,6 +657,23 @@ export default function ModelPreview({
   useEffect(() => {
     onSyncChangeRef.current = onSyncChange;
   }, [onSyncChange]);
+
+  useEffect(() => {
+    displayModeRef.current = displayMode;
+    applyDisplayMode(materialVariantsRef.current, displayMode);
+  }, [displayMode]);
+
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    const threeScene = threeSceneRef.current;
+    if (renderer) {
+      renderer.setClearColor(
+        darkMode ? PREVIEW_DARK_BACKGROUND : PREVIEW_LIGHT_BACKGROUND,
+        1,
+      );
+    }
+    if (threeScene) threeScene.background = previewBackground(darkMode);
+  }, [darkMode]);
 
   useEffect(() => {
     const camera = cameraRef.current;
@@ -620,8 +705,9 @@ export default function ModelPreview({
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    configurePreviewRenderer(renderer);
     renderer.setClearColor(darkMode ? PREVIEW_DARK_BACKGROUND : PREVIEW_LIGHT_BACKGROUND, 1);
+    rendererRef.current = renderer;
     container.innerHTML = "";
     container.appendChild(renderer.domElement);
 
@@ -670,12 +756,7 @@ export default function ModelPreview({
     };
     updateCameraAspectFromContainer();
 
-    const ambient = new THREE.AmbientLight(0xffffff, 1.4);
-    const key = new THREE.DirectionalLight(0xffffff, 1.2);
-    key.position.set(4, 5, 7);
-    const fill = new THREE.DirectionalLight(0xffffff, 0.45);
-    fill.position.set(-5, 2, -4);
-    threeScene.add(ambient, key, fill);
+    addSharedPreviewLights(threeScene, "textureYUp");
 
     threeSceneRef.current = threeScene;
     let modelRoot: THREE.Object3D | null = null;
@@ -683,6 +764,8 @@ export default function ModelPreview({
       modelRoot = scene.clone(true);
       modelRoot.name = "Preview root";
       applyPreviewColourCorrection(modelRoot, colourCorrection);
+      materialVariantsRef.current = buildPreviewMaterialVariants(modelRoot);
+      applyDisplayMode(materialVariantsRef.current, displayModeRef.current);
       modelRootRef.current = modelRoot;
       threeScene.add(modelRoot);
       const canPreserveCamera = Boolean(
@@ -763,12 +846,15 @@ export default function ModelPreview({
         axesRef.current = null;
       }
       if (modelRootRef.current) removeWireframeOverlay(modelRootRef.current);
+      disposeFlatPreviewMaterials(materialVariantsRef.current);
+      materialVariantsRef.current = [];
       modelRootRef.current = null;
       threeSceneRef.current = null;
+      rendererRef.current = null;
       renderer.dispose();
       renderer.domElement.remove();
     };
-  }, [scene, darkMode, syncId, colourCorrection]);
+  }, [scene, syncId, colourCorrection]);
 
   useEffect(() => {
     const camera = cameraRef.current;

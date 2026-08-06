@@ -38,11 +38,21 @@ class ObjParseState {
   colourKeys = new Set<number>();
   currentObject = 'default';
   coloredVertexCount = 0;
+  pendingFaceColor: RGB | null = null;
 
   processLine(raw: string): void {
-    if (!raw || raw.charCodeAt(0) === 35) return; // #
+    if (!raw) return;
     const line = raw.trim();
     if (!line) return;
+
+    if (line.startsWith('#')) {
+      const prefix = '# VC2CM face_color ';
+      if (line.startsWith(prefix)) {
+        this.pendingFaceColor = parseRgbValues(line.slice(prefix.length).trim().split(/\s+/));
+      }
+      return;
+    }
+
     const head = line.slice(0, 2);
 
     if ((head === 'o ' || head === 'g ') && line.length > 2) {
@@ -65,6 +75,8 @@ class ObjParseState {
     }
 
     if (head === 'f ') {
+      const explicitFaceColor = this.pendingFaceColor;
+      this.pendingFaceColor = null;
       const parts = line.split(/\s+/);
       if (parts.length < 4) return;
       let indices: number[];
@@ -77,13 +89,13 @@ class ObjParseState {
         const tri: Tri = [indices[0], indices[i], indices[i + 1]];
         if (tri.some(idx => idx < 0 || idx >= this.vertices.length)) continue;
         const cols = tri.map(idx => this.vertexColours[idx]).filter((c): c is RGB => c !== null);
-        const rgb: RGB = cols.length === 3
+        const rgb: RGB = explicitFaceColor ?? (cols.length === 3
           ? [
               clamp255((cols[0][0] + cols[1][0] + cols[2][0]) / 3),
               clamp255((cols[0][1] + cols[1][1] + cols[2][1]) / 3),
               clamp255((cols[0][2] + cols[1][2] + cols[2][2]) / 3),
             ]
-          : [180, 180, 180];
+          : [180, 180, 180]);
         this.triangles.push(tri);
         this.triangleColors.push(rgb);
         this.colourKeys.add(colourKey(rgb));

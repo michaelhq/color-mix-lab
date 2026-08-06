@@ -62,6 +62,11 @@ interface WeldedVertex {
  * keeps the OBJ suitable as the handoff format for VertexColor2ColorMix and avoids
  * the triangle-soup open-edge problem from earlier debug exports.
  *
+ * The exact baked colour of each triangle is additionally written as a Color Mix
+ * Lab comment directly before its face line. VertexColor2ColorMix can therefore
+ * restore the original per-face colours while other OBJ readers safely ignore the
+ * extension and continue to use the compatible averaged vertex colours.
+ *
  * The exported coordinates are intentionally rebased to a local origin after all
  * scene/world transforms have been applied. GLB assets often carry large world
  * translations; if those are written into OBJ, downstream tools can fail to center
@@ -100,6 +105,7 @@ export function exportBakedSceneToVertexColorObj(
     const triangleCount = index ? Math.floor(index.count / 3) : Math.floor(position.count / 3);
     for (let tri = 0; tri < triangleCount; tri += 1) {
       const exportedIndices: number[] = [];
+      const faceCornerColors: Array<[number, number, number]> = [];
 
       for (let corner = 0; corner < 3; corner += 1) {
         const local = index ? index.getX(tri * 3 + corner) : tri * 3 + corner;
@@ -111,6 +117,7 @@ export function exportBakedSceneToVertexColorObj(
         if (color) {
           cornerRgb = linearColorToSrgbFloats(color.getX(local), color.getY(local), color.getZ(local));
         }
+        faceCornerColors.push(cornerRgb);
 
         const key = positionKey(p);
         let exportedIndex = vertexIndexByKey.get(key);
@@ -136,6 +143,12 @@ export function exportBakedSceneToVertexColorObj(
         exportedIndices.push(exportedIndex);
       }
 
+      const faceR = faceCornerColors.reduce((sum, rgb) => sum + rgb[0], 0) / faceCornerColors.length;
+      const faceG = faceCornerColors.reduce((sum, rgb) => sum + rgb[1], 0) / faceCornerColors.length;
+      const faceB = faceCornerColors.reduce((sum, rgb) => sum + rgb[2], 0) / faceCornerColors.length;
+      faceLines.push(
+        `# VC2CM face_color ${formatNumber(faceR)} ${formatNumber(faceG)} ${formatNumber(faceB)}`,
+      );
       faceLines.push(`f ${exportedIndices[0]} ${exportedIndices[1]} ${exportedIndices[2]}`);
       faceCount += 1;
     }
@@ -152,6 +165,7 @@ export function exportBakedSceneToVertexColorObj(
   objLines.push('# Color Mix Lab coordinate mode: keep');
   objLines.push('# Handoff format for VertexColor2ColorMix. Colors are embedded as: v x y z r g b');
   objLines.push('# Vertices are welded by position; colors at shared vertices are averaged.');
+  objLines.push('# Exact baked face colors are embedded as: # VC2CM face_color r g b');
   objLines.push('# Coordinates are rotated from Texture Baking Y-up to printer Z-up, then rebased to local bounding-box center before scaling.');
   objLines.push(`# Exported printer-space bbox min: ${formatNumber(rawMin.x)} ${formatNumber(rawMin.y)} ${formatNumber(rawMin.z)}`);
   objLines.push(`# Exported printer-space bbox max: ${formatNumber(rawMax.x)} ${formatNumber(rawMax.y)} ${formatNumber(rawMax.z)}`);

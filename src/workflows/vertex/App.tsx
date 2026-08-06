@@ -47,7 +47,11 @@ import {
   type VirtualBlendEntry,
   type VirtualExtruderPlan,
 } from "./core/virtualExtruders";
-import { ThreePreview, type ThreePreviewHandle } from "./ui/ThreePreview";
+import {
+  ThreePreview,
+  type CameraSyncState,
+  type ThreePreviewHandle,
+} from "./ui/ThreePreview";
 import { getDict, Lang } from "./i18n";
 import {
   applyOrientationMatrixToVec3,
@@ -64,14 +68,15 @@ import {
   type ModelRotationCommand,
   type OrientationMatrix,
 } from "../common/modelOrientation";
+import type { PreviewDisplayMode } from "../common/previewRendering";
 
 type View = "front" | "back" | "left" | "right" | "top" | "bottom";
 type PreviewMode = "adjusted" | "quantized" | "print";
+type PreviewPaneId = "single" | "left" | "print";
 type ResolvedPreviewBackground = "light" | "dark";
 type PreviewBackground = "auto" | ResolvedPreviewBackground;
 type ThemeMode = "system" | "light" | "dark";
 type WebglLodMode = "off" | "tiny" | "small" | "medium";
-type PreviewDisplayMode = "shaded" | "flat";
 type PhysicalColourSource = "preset" | "template" | "manual" | "suggestion";
 type SidebarTab =
   | "model"
@@ -1691,6 +1696,10 @@ export default function App({
 
   const [view, setView] = useState<View>("front");
   const [previewMode, setPreviewMode] = useState<PreviewMode>("quantized");
+  const [splitPreviewEnabled, setSplitPreviewEnabled] = useState(true);
+  const [syncSplitPreviews, setSyncSplitPreviews] = useState(true);
+  const [previewCameraSyncState, setPreviewCameraSyncState] =
+    useState<CameraSyncState | null>(null);
   const [previewBackground, setPreviewBackground] =
     useState<PreviewBackground>("auto");
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
@@ -1925,6 +1934,12 @@ export default function App({
   }, [filamentMaterialFilter, manualFilamentSlots]);
 
   const previewRef = useRef<ThreePreviewHandle | null>(null);
+  const printPreviewRef = useRef<ThreePreviewHandle | null>(null);
+  const previewBusyByIdRef = useRef<Record<PreviewPaneId, boolean>>({
+    single: false,
+    left: false,
+    print: false,
+  });
   const baseModelRef = useRef<MeshModel | null>(null);
   const orientationMatrixRef = useRef<OrientationMatrix>([
     ...IDENTITY_ORIENTATION_MATRIX,
@@ -2312,6 +2327,7 @@ export default function App({
     setLargeModelComputationsDeferred(false);
     setThreePreviewRequested(true);
     setForceThreePreview(false);
+    setPreviewCameraSyncState(null);
     setPalette([]);
     setSlots([]);
     setAssignmentOverrides({});
@@ -2465,7 +2481,7 @@ export default function App({
     orientationMatrixRef.current = [...matrix];
     setModel(modelWithOrientationMatrix(baseModel, matrix));
     setStatus(`${t.modelOrientation}: ${actionLabel} (${sourceLabel}).`);
-    window.requestAnimationFrame(() => previewRef.current?.fitToModel());
+    window.requestAnimationFrame(fitPreviewViews);
   }
 
   async function runVertexOrientationOperation(operation: () => void): Promise<void> {
@@ -2541,7 +2557,7 @@ export default function App({
   function setVertexCurrentOrientation(): void {
     setFineRotationAngle(0);
     setStatus(`${t.modelOrientation}: current orientation set.`);
-    window.requestAnimationFrame(() => previewRef.current?.fitToModel());
+    window.requestAnimationFrame(fitPreviewViews);
   }
 
   async function resetVertexModelOrientation(sourceLabel = "model"): Promise<void> {
@@ -2578,6 +2594,8 @@ export default function App({
       themeMode,
       previewBackground,
       previewMode,
+      splitPreviewEnabled,
+      syncSplitPreviews,
       previewDisplayMode,
       webglLodMode,
       modelOrientationMatrix: orientationMatrixRef.current,
@@ -2716,6 +2734,14 @@ export default function App({
     const nextPreviewMode = isPreviewMode(settings.previewMode)
       ? settings.previewMode
       : previewMode;
+    const nextSplitPreviewEnabled =
+      typeof settings.splitPreviewEnabled === "boolean"
+        ? settings.splitPreviewEnabled
+        : splitPreviewEnabled;
+    const nextSyncSplitPreviews =
+      typeof settings.syncSplitPreviews === "boolean"
+        ? settings.syncSplitPreviews
+        : syncSplitPreviews;
     const nextPreviewDisplayMode = isPreviewDisplayMode(
       settings.previewDisplayMode,
     )
@@ -2824,7 +2850,14 @@ export default function App({
     setLang(nextLang);
     setThemeMode(nextThemeMode);
     setPreviewBackground(nextPreviewBackground);
-    setPreviewMode(nextPreviewMode);
+    setSplitPreviewEnabled(nextSplitPreviewEnabled);
+    setSyncSplitPreviews(nextSyncSplitPreviews);
+    setPreviewCameraSyncState(null);
+    setPreviewMode(
+      nextSplitPreviewEnabled && nextPreviewMode === "print"
+        ? "quantized"
+        : nextPreviewMode,
+    );
     setPreviewDisplayMode(nextPreviewDisplayMode);
     setWebglLodMode(
       isWebglLodMode(settings.webglLodMode)
@@ -3465,27 +3498,58 @@ export default function App({
     }, 80);
   }
 
-  function handlePreviewBusyChange(busy: boolean) {
-    previewBusyRef.current = busy;
-    setPreviewBusy(busy);
-    if (busy && waitingForThreePreviewProgressRef.current) {
+  function handlePreviewBusyChange(source: PreviewPaneId, busy: boolean) {
+    previewBusyByIdRef.current[source] = busy;
+    const anyBusy = Object.values(previewBusyByIdRef.current).some(Boolean);
+    if (anyBusy === previewBusyRef.current) return;
+    previewBusyRef.current = anyBusy;
+    setPreviewBusy(anyBusy);
+    if (anyBusy && waitingForThreePreviewProgressRef.current) {
       showProgress("preview", t.progress3dTitle, threePreviewSteps, 2);
     }
-    if (!busy && waitingForThreePreviewProgressRef.current) {
+    if (!anyBusy && waitingForThreePreviewProgressRef.current) {
       waitingForThreePreviewProgressRef.current = false;
       finishPreviewProgress(threePreviewSteps);
     }
-    if (!busy && waitingForPreviewAfterPaletteApplyRef.current) {
+    if (!anyBusy && waitingForPreviewAfterPaletteApplyRef.current) {
       finishPaletteApply();
     }
-    if (!busy && waitingForPreviewAfterApplyRef.current) {
+    if (!anyBusy && waitingForPreviewAfterApplyRef.current) {
       finishColourApply();
     }
   }
 
   function handlePreviewModeChange(next: PreviewMode): void {
-    if (next === previewMode) return;
-    setPreviewMode(next);
+    const normalized = splitPreviewEnabled && next === "print" ? "quantized" : next;
+    if (normalized === previewMode) return;
+    setPreviewMode(normalized);
+  }
+
+  function handleSplitPreviewChange(enabled: boolean): void {
+    setSplitPreviewEnabled(enabled);
+    setPreviewCameraSyncState(null);
+    previewBusyByIdRef.current = { single: false, left: false, print: false };
+    previewBusyRef.current = false;
+    setPreviewBusy(false);
+    if (enabled && previewMode === "print") setPreviewMode("quantized");
+  }
+
+  function handleSyncSplitPreviewsChange(enabled: boolean): void {
+    setSyncSplitPreviews(enabled);
+  }
+
+  function handlePreviewCameraSyncChange(state: CameraSyncState): void {
+    setPreviewCameraSyncState(state);
+  }
+
+  function fitPreviewViews(): void {
+    previewRef.current?.fitToModel();
+    if (splitPreviewEnabled) printPreviewRef.current?.fitToModel();
+  }
+
+  function resetPreviewViews(): void {
+    previewRef.current?.resetView(view);
+    if (splitPreviewEnabled) printPreviewRef.current?.resetView(view);
   }
 
   function handlePreviewDisplayModeChange(next: PreviewDisplayMode): void {
@@ -3664,6 +3728,7 @@ export default function App({
 
   function handleRebuildPreview(): void {
     if (!model) return;
+    setPreviewCameraSyncState(null);
     clearPreviewProgressFallback();
     waitingForThreePreviewProgressRef.current = false;
     setPreviewResetKey((value) => value + 1);
@@ -3682,6 +3747,7 @@ export default function App({
     setLargeModelComputationsDeferred(false);
     setThreePreviewRequested(false);
     setForceThreePreview(false);
+    setPreviewCameraSyncState(null);
     setPalette([]);
     setSlots([]);
     setAssignmentOverrides({});
@@ -6473,7 +6539,9 @@ export default function App({
                     >
                       <option value="adjusted">{t.adjusted}</option>
                       <option value="quantized">{t.quantized}</option>
-                      <option value="print">{t.printSimulation}</option>
+                      {!splitPreviewEnabled && (
+                        <option value="print">{t.printSimulation}</option>
+                      )}
                     </select>
                   </label>
                   <label title={t.tipDisplayMode}>
@@ -6514,7 +6582,10 @@ export default function App({
                       <select
                         value={view}
                         disabled={!model || largeModelComputationsDeferred}
-                        onChange={(e) => setView(e.target.value as View)}
+                        onChange={(e) => {
+                          setPreviewCameraSyncState(null);
+                          setView(e.target.value as View);
+                        }}
                       >
                         <option value="front">{t.front}</option>
                         <option value="back">{t.back}</option>
@@ -6547,6 +6618,32 @@ export default function App({
                       />
                       <HelpLabel title={t.tipAxes}>{t.axes}</HelpLabel>
                     </label>
+                    <label title={t.tipSplitView}>
+                      <input
+                        type="checkbox"
+                        checked={splitPreviewEnabled}
+                        disabled={!model || largeModelComputationsDeferred}
+                        onChange={(e) =>
+                          handleSplitPreviewChange(e.target.checked)
+                        }
+                      />
+                      <HelpLabel title={t.tipSplitView}>{t.splitView}</HelpLabel>
+                    </label>
+                    <label title={t.tipSyncViews}>
+                      <input
+                        type="checkbox"
+                        checked={syncSplitPreviews}
+                        disabled={
+                          !splitPreviewEnabled ||
+                          !model ||
+                          largeModelComputationsDeferred
+                        }
+                        onChange={(e) =>
+                          handleSyncSplitPreviewsChange(e.target.checked)
+                        }
+                      />
+                      <HelpLabel title={t.tipSyncViews}>{t.syncViews}</HelpLabel>
+                    </label>
                     <label title={t.tipWebglPreviewLod}>
                       <HelpLabel title={t.tipWebglPreviewLod}>
                         {t.webglPreviewLod}
@@ -6572,7 +6669,7 @@ export default function App({
                         largeModelComputationsDeferred ||
                         !threePreviewActive
                       }
-                      onClick={() => previewRef.current?.fitToModel()}
+                      onClick={fitPreviewViews}
                       title={t.tipFitToModel}
                     >
                       {t.fitToModel}
@@ -6585,7 +6682,7 @@ export default function App({
                         largeModelComputationsDeferred ||
                         !threePreviewActive
                       }
-                      onClick={() => previewRef.current?.resetView(view)}
+                      onClick={resetPreviewViews}
                       title={t.tipResetView}
                     >
                       {t.resetView}
@@ -6670,27 +6767,104 @@ export default function App({
                 </div>
               ) : (
                 <section className="optional-three-card optional-three-card-fill">
-                  <ThreePreview
-                    key={previewResetKey}
-                    ref={previewRef}
-                    model={threePreviewActive ? modelForComputedPreview : null}
-                    adjustedColors={adjustedColors}
-                    previewMode={previewMode}
-                    palette={palette}
-                    effectivePaletteRgbByIndex={effectivePaletteRgbByIndex}
-                    accentProtection={appliedAccentProtection}
-                    view={view}
-                    background={resolvedPreviewBackground}
-                    displayMode={previewDisplayMode}
-                    wireframe={wireframe}
-                    showAxes={showAxes || showOrientationAxisGuide}
-                    showAxisLabels={showOrientationAxisGuide}
-                    lodMode={webglLodMode}
-                    maxPreviewTriangles={MAX_WEBGL_PREVIEW_TRIANGLES}
-                    onBusyChange={handlePreviewBusyChange}
-                    emptyLabel={t.noModel}
-                    busyLabel={t.buildingPreview}
-                  />
+                  {splitPreviewEnabled ? (
+                    <div className="vertex-preview-grid">
+                      <div className="preview-cell">
+                        <div className="preview-cell-title">
+                          {previewMode === "adjusted" ? t.adjusted : t.quantized}
+                        </div>
+                        <ThreePreview
+                          key={`left-${previewResetKey}`}
+                          ref={previewRef}
+                          model={
+                            threePreviewActive ? modelForComputedPreview : null
+                          }
+                          adjustedColors={adjustedColors}
+                          previewMode={
+                            previewMode === "adjusted" ? "adjusted" : "quantized"
+                          }
+                          palette={palette}
+                          effectivePaletteRgbByIndex={effectivePaletteRgbByIndex}
+                          accentProtection={appliedAccentProtection}
+                          view={view}
+                          background={resolvedPreviewBackground}
+                          displayMode={previewDisplayMode}
+                          wireframe={wireframe}
+                          showAxes={showAxes || showOrientationAxisGuide}
+                          showAxisLabels={showOrientationAxisGuide}
+                          lodMode={webglLodMode}
+                          maxPreviewTriangles={MAX_WEBGL_PREVIEW_TRIANGLES}
+                          onBusyChange={(busy) =>
+                            handlePreviewBusyChange("left", busy)
+                          }
+                          syncId="left"
+                          syncEnabled={syncSplitPreviews}
+                          syncState={previewCameraSyncState}
+                          onSyncChange={handlePreviewCameraSyncChange}
+                          emptyLabel={t.noModel}
+                          busyLabel={t.buildingPreview}
+                        />
+                      </div>
+                      <div className="preview-cell">
+                        <div className="preview-cell-title">
+                          {t.printSimulation}
+                        </div>
+                        <ThreePreview
+                          key={`print-${previewResetKey}`}
+                          ref={printPreviewRef}
+                          model={
+                            threePreviewActive ? modelForComputedPreview : null
+                          }
+                          adjustedColors={adjustedColors}
+                          previewMode="print"
+                          palette={palette}
+                          effectivePaletteRgbByIndex={effectivePaletteRgbByIndex}
+                          accentProtection={appliedAccentProtection}
+                          view={view}
+                          background={resolvedPreviewBackground}
+                          displayMode={previewDisplayMode}
+                          wireframe={wireframe}
+                          showAxes={showAxes || showOrientationAxisGuide}
+                          showAxisLabels={showOrientationAxisGuide}
+                          lodMode={webglLodMode}
+                          maxPreviewTriangles={MAX_WEBGL_PREVIEW_TRIANGLES}
+                          onBusyChange={(busy) =>
+                            handlePreviewBusyChange("print", busy)
+                          }
+                          syncId="print"
+                          syncEnabled={syncSplitPreviews}
+                          syncState={previewCameraSyncState}
+                          onSyncChange={handlePreviewCameraSyncChange}
+                          emptyLabel={t.noModel}
+                          busyLabel={t.buildingPreview}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <ThreePreview
+                      key={`single-${previewResetKey}`}
+                      ref={previewRef}
+                      model={threePreviewActive ? modelForComputedPreview : null}
+                      adjustedColors={adjustedColors}
+                      previewMode={previewMode}
+                      palette={palette}
+                      effectivePaletteRgbByIndex={effectivePaletteRgbByIndex}
+                      accentProtection={appliedAccentProtection}
+                      view={view}
+                      background={resolvedPreviewBackground}
+                      displayMode={previewDisplayMode}
+                      wireframe={wireframe}
+                      showAxes={showAxes || showOrientationAxisGuide}
+                      showAxisLabels={showOrientationAxisGuide}
+                      lodMode={webglLodMode}
+                      maxPreviewTriangles={MAX_WEBGL_PREVIEW_TRIANGLES}
+                      onBusyChange={(busy) =>
+                        handlePreviewBusyChange("single", busy)
+                      }
+                      emptyLabel={t.noModel}
+                      busyLabel={t.buildingPreview}
+                    />
+                  )}
                 </section>
               )}
             </div>
