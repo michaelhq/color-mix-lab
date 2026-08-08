@@ -312,8 +312,17 @@ interface BlendCandidate {
   sequenceKey: string;
   fdmRgb: RGB;
   fdmLab: LAB;
+  fdmChroma: number;
+  fdmHue: number;
+  rgbChroma: number;
+  complexityPenalty: number;
   layerAverageRgb: RGB;
 }
+
+const blendCandidateCache = new WeakMap<
+  PhysicalSlot[],
+  Map<string, BlendCandidate[]>
+>();
 
 function recipeResolutionFromLegacyStep(ratioStepPercent: number | undefined): MixingRecipeResolution {
   const safeStep = Number.isFinite(ratioStepPercent) ? Number(ratioStepPercent) : 5;
@@ -450,6 +459,13 @@ function makeBlendCandidates(
             ratio: canonical.counts[index] ?? item.unitCount,
           })),
         );
+        const fdmChroma = labChroma(fdm.lab);
+        const fdmHue = labHueDegrees(fdm.lab);
+        const rgbChroma = colourChroma(fdm.rgb);
+        const tinyComponentPenalty = ratios.filter(
+          (ratio) => ratio > 0 && ratio < 0.08,
+        ).length * 0.08;
+        const componentPenalty = (subset.length - 1) * 0.04;
         out.push({
           subset,
           ratios,
@@ -459,6 +475,10 @@ function makeBlendCandidates(
           sequenceKey: layerSequenceKey(canonical.sequence),
           fdmRgb: fdm.rgb,
           fdmLab: fdm.lab,
+          fdmChroma,
+          fdmHue,
+          rgbChroma,
+          complexityPenalty: tinyComponentPenalty + componentPenalty,
           layerAverageRgb: effectiveRgbFromCounts(active, canonical.counts),
         });
       }
@@ -468,14 +488,40 @@ function makeBlendCandidates(
   return out;
 }
 
+function getBlendCandidates(
+  slots: PhysicalSlot[],
+  maxComponents: 1 | 2 | 3,
+  recipeResolution: MixingRecipeResolution,
+): BlendCandidate[] {
+  let bySettings = blendCandidateCache.get(slots);
+  if (!bySettings) {
+    bySettings = new Map<string, BlendCandidate[]>();
+    blendCandidateCache.set(slots, bySettings);
+  }
+  const slotKey = slots
+    .map(
+      (slot) =>
+        `${slot.slot}:${slot.filament.effectiveRgb[0]},${slot.filament.effectiveRgb[1]},${slot.filament.effectiveRgb[2]}`,
+    )
+    .join(";");
+  const key = `${maxComponents}|${recipeResolution}|${slotKey}`;
+  const cached = bySettings.get(key);
+  if (cached) return cached;
+  const built = makeBlendCandidates(slots, maxComponents, recipeResolution);
+  bySettings.set(key, built);
+  return built;
+}
+
 function candidateScore(
-  targetRgb: RGB,
   targetLab: LAB,
+  targetChroma: number,
+  targetHue: number,
+  targetRgbChroma: number,
   candidate: BlendCandidate,
+  baseDistance: number,
   accentProtection: AccentProtectionMode,
   mixPriority: VirtualMixPriorityMode,
   mappingStrategy: MappingStrategyMode,
-  colourDifferenceMetric: ColourDifferenceMetric,
   targetWeightShare: number,
   previewLightnessOffset: number,
 ): number {
@@ -485,13 +531,10 @@ function candidateScore(
   // offset only to the displayed virtual colour after the sequence is chosen.
   void previewLightnessOffset;
   const candidateLab = candidate.fdmLab;
-  const candidateRgb = candidate.fdmRgb;
-  let score = colourDistance(targetLab, candidateLab, colourDifferenceMetric);
+  let score = baseDistance;
 
-  const targetChroma = labChroma(targetLab);
-  const candidateChroma = labChroma(candidateLab);
-  const targetHue = labHueDegrees(targetLab);
-  const candidateHue = labHueDegrees(candidateLab);
+  const candidateChroma = candidate.fdmChroma;
+  const candidateHue = candidate.fdmHue;
   const hueGap = targetChroma >= 6 && candidateChroma >= 4
     ? hueDistanceDegrees(targetHue, candidateHue)
     : 0;
@@ -512,8 +555,7 @@ function candidateScore(
     // Keep this mode conservative: favour same-hue candidates only when they
     // remain close to the calibrated Prusa FDM mixer colour match.
     if (hueGap > 22) score += (hueGap - 22) * 0.22;
-    const rgbChroma = colourChroma(candidateRgb);
-    if (rgbChroma < colourChroma(targetRgb) * 0.45) score += 2.5;
+    if (candidate.rgbChroma < targetRgbChroma * 0.45) score += 2.5;
   }
 
   if (mappingStrategy === "preserve-hue" && targetChroma >= 10) {
@@ -540,9 +582,7 @@ function candidateScore(
     score += warmNeutralGuardPenalty(targetLab, candidateLab, hueGap);
   }
 
-  const tinyComponentPenalty = candidate.ratios.filter((r) => r > 0 && r < 0.08).length * 0.08;
-  const componentPenalty = (candidate.subset.length - 1) * 0.04;
-  return score + tinyComponentPenalty + componentPenalty;
+  return score + candidate.complexityPenalty;
 }
 
 function clampLabLightness(value: number): number {
@@ -581,38 +621,83 @@ function bestBlendForColour(
 } | null {
   if (candidates.length === 0) return null;
   const targetLab = rgbToLab(targetRgb);
+  const targetChroma = labChroma(targetLab);
+  const targetHue = labHueDegrees(targetLab);
+  const targetRgbChroma = colourChroma(targetRgb);
+
   let rawBestScore = Number.POSITIVE_INFINITY;
-  const scored: Array<BlendCandidate & { score: number; error: number }> = [];
-  for (const candidate of candidates) {
-    const error = colourDistance(targetLab, candidate.fdmLab, colourDifferenceMetric);
-    const score = candidateScore(
-      targetRgb,
+  let rawBestIndex = -1;
+  let rawBestError = Number.POSITIVE_INFINITY;
+  const smoothScores =
+    mappingStrategy === "smooth" ? new Float64Array(candidates.length) : null;
+  const smoothErrors =
+    mappingStrategy === "smooth" ? new Float64Array(candidates.length) : null;
+
+  for (let index = 0; index < candidates.length; index++) {
+    const candidate = candidates[index];
+    const error = colourDistance(
       targetLab,
+      candidate.fdmLab,
+      colourDifferenceMetric,
+    );
+    const score = candidateScore(
+      targetLab,
+      targetChroma,
+      targetHue,
+      targetRgbChroma,
       candidate,
+      error,
       accentProtection,
       mixPriority,
       mappingStrategy,
-      colourDifferenceMetric,
       targetWeightShare,
       previewLightnessOffset,
     );
-    rawBestScore = Math.min(rawBestScore, score);
-    scored.push({ ...candidate, score, error });
+    if (smoothScores) {
+      smoothScores[index] = score;
+      smoothErrors![index] = error;
+    }
+    if (score < rawBestScore) {
+      rawBestScore = score;
+      rawBestIndex = index;
+      rawBestError = error;
+    }
   }
 
-  let best: (BlendCandidate & { score: number; error: number }) | null = null;
-  for (const candidate of scored) {
-    let score = candidate.score;
-    if (
-      mappingStrategy === "smooth" &&
-      previousSmoothLab &&
-      candidate.score <= rawBestScore + 7
-    ) {
-      score += colourDistance(previousSmoothLab, candidate.fdmLab, colourDifferenceMetric) * 0.06;
+  let bestIndex = rawBestIndex;
+  let bestScore = rawBestScore;
+  let bestError = rawBestError;
+  if (
+    mappingStrategy === "smooth" &&
+    previousSmoothLab &&
+    smoothScores &&
+    smoothErrors
+  ) {
+    bestIndex = -1;
+    bestScore = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < candidates.length; index++) {
+      const rawScore = smoothScores[index];
+      const candidate = candidates[index];
+      const score =
+        rawScore <= rawBestScore + 7
+          ? rawScore +
+            colourDistance(
+              previousSmoothLab,
+              candidate.fdmLab,
+              colourDifferenceMetric,
+            ) *
+              0.06
+          : rawScore;
+      if (score < bestScore) {
+        bestScore = score;
+        bestIndex = index;
+        bestError = smoothErrors[index];
+      }
     }
-    if (!best || score < best.score) best = { ...candidate, score };
   }
-  if (!best) return null;
+
+  if (bestIndex < 0) return null;
+  const best = candidates[bestIndex];
   return {
     subset: best.subset,
     ratios: best.ratios,
@@ -623,8 +708,8 @@ function bestBlendForColour(
     fdmRgb: best.fdmRgb,
     fdmLab: best.fdmLab,
     layerAverageRgb: best.layerAverageRgb,
-    error: best.error,
-    diagnosticError: best.score,
+    error: bestError,
+    diagnosticError: bestScore,
   };
 }
 
@@ -817,7 +902,7 @@ export function buildVirtualExtruderPlan(
     string,
     VirtualBlendEntry & { weightedTargets: Array<{ rgb: RGB; weight: number }> }
   >();
-  const blendCandidates = makeBlendCandidates(
+  const blendCandidates = getBlendCandidates(
     physicalSlots,
     opts.maxComponents,
     opts.recipeResolution ?? recipeResolutionFromLegacyStep(opts.ratioStepPercent),

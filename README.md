@@ -194,7 +194,7 @@ It is meant to be closer to the PrusaSlicer / ColorMix concept than a simple RGB
 
 ### Prusa FDM Mixer preview model
 
-Color Mix Lab uses a local, dependency-free implementation of Prusa’s calibrated `prusa-fdm-mixer` v7 model rather than a simple RGB or sRGB layer average. The implementation is kept inside Color Mix Lab and was verified against the current upstream TypeScript reference predictions for version 0.8.3.
+Color Mix Lab uses a local, dependency-free implementation of Prusa’s calibrated `prusa-fdm-mixer` v7 model rather than a simple RGB or sRGB layer average. The implementation is kept inside Color Mix Lab and is verified against the current upstream TypeScript reference predictions.
 
 This matters because FDM colour mixing is not just a mathematical RGB blend. Real filament mixing is affected by material behaviour, layer interaction, pigment strength, and the way the slicer represents virtual mixes.
 

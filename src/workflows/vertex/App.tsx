@@ -1957,6 +1957,8 @@ export default function App({
   ]);
   const waitingForPreviewAfterApplyRef = useRef(false);
   const waitingForPreviewAfterPaletteApplyRef = useRef(false);
+  const deferVirtualPlanUntilPaletteRef = useRef(false);
+  const baseVirtualExtruderPlanRef = useRef<VirtualExtruderPlan | null>(null);
   const waitingForThreePreviewProgressRef = useRef(false);
   const previewProgressTimeoutRef = useRef<number | null>(null);
   const previewBusyRef = useRef(false);
@@ -2307,15 +2309,29 @@ export default function App({
       triangleAreaWeights,
       appliedAccentProtection,
     );
-    setPalette(pal);
 
-    if (waitingForPreviewAfterPaletteApplyRef.current) {
-      window.setTimeout(() => {
-        if (!previewBusyRef.current) {
-          finishPaletteApply();
-        }
-      }, 120);
+    const commitPalette = () => {
+      deferVirtualPlanUntilPaletteRef.current = false;
+      setPalette(pal);
+      if (waitingForPreviewAfterPaletteApplyRef.current) {
+        window.setTimeout(() => {
+          if (!previewBusyRef.current) {
+            finishPaletteApply();
+          }
+        }, 120);
+      }
+    };
+
+    if (
+      waitingForPreviewAfterPaletteApplyRef.current &&
+      deferVirtualPlanUntilPaletteRef.current
+    ) {
+      showProgress("palette", t.progressPaletteTitle, paletteSteps, 2);
+      window.setTimeout(commitPalette, 20);
+      return;
     }
+
+    commitPalette();
   }, [
     model,
     adjustedColors,
@@ -3328,9 +3344,10 @@ export default function App({
       window.clearTimeout(paletteApplyTimeoutRef.current);
     paletteApplyTimeoutRef.current = window.setTimeout(() => {
       waitingForPreviewAfterPaletteApplyRef.current = false;
+      deferVirtualPlanUntilPaletteRef.current = false;
       setPaletteApplyBusy(false);
       paletteApplyTimeoutRef.current = null;
-    }, 1800);
+    }, 60_000);
   }
 
   const adjustmentsDirty = !sameAdjustments(
@@ -3485,6 +3502,10 @@ export default function App({
       return;
     }
 
+    const paletteNeedsRebuild =
+      next !== appliedMaxColours ||
+      nextAccentProtection !== appliedAccentProtection;
+    deferVirtualPlanUntilPaletteRef.current = paletteNeedsRebuild;
     setPaletteApplyBusy(true);
     setStatus(t.applyingPaletteSettings);
     showProgress("palette", t.progressPaletteTitle, paletteSteps, 0);
@@ -3492,18 +3513,25 @@ export default function App({
     schedulePaletteApplyFallback();
 
     window.setTimeout(() => {
-      showProgress("palette", t.progressPaletteTitle, paletteSteps, 1);
-      setAssignmentOverrides({});
-      setSelectedAssignmentKeys([]);
-      setAppliedMaxColours(next);
-      setAppliedRecipeResolution(nextRecipeResolution);
-      setAppliedColourAssignmentMode(nextColourAssignmentMode);
-      setAppliedMaxVirtualMixComponents(nextMaxVirtualMixComponents);
-      setAppliedAccentProtection(nextAccentProtection);
-      setAppliedVirtualMixPriority(nextVirtualMixPriority);
-      setAppliedMappingStrategy(nextMappingStrategy);
-      setAppliedColourDifferenceMetric(nextColourDifferenceMetric);
-      setAppliedVirtualPreviewLightness(nextVirtualPreviewLightness);
+      showProgress(
+        "palette",
+        t.progressPaletteTitle,
+        paletteSteps,
+        paletteNeedsRebuild ? 1 : 2,
+      );
+      window.setTimeout(() => {
+        setAssignmentOverrides({});
+        setSelectedAssignmentKeys([]);
+        setAppliedMaxColours(next);
+        setAppliedRecipeResolution(nextRecipeResolution);
+        setAppliedColourAssignmentMode(nextColourAssignmentMode);
+        setAppliedMaxVirtualMixComponents(nextMaxVirtualMixComponents);
+        setAppliedAccentProtection(nextAccentProtection);
+        setAppliedVirtualMixPriority(nextVirtualMixPriority);
+        setAppliedMappingStrategy(nextMappingStrategy);
+        setAppliedColourDifferenceMetric(nextColourDifferenceMetric);
+        setAppliedVirtualPreviewLightness(nextVirtualPreviewLightness);
+      }, 20);
     }, 40);
   }
 
@@ -3667,7 +3695,13 @@ export default function App({
   }, [currentPhysicalSlots]);
 
   const baseVirtualExtruderPlan = useMemo(() => {
-    return buildVirtualExtruderPlan(palette, currentPhysicalSlots, {
+    if (
+      deferVirtualPlanUntilPaletteRef.current &&
+      baseVirtualExtruderPlanRef.current
+    ) {
+      return baseVirtualExtruderPlanRef.current;
+    }
+    const plan = buildVirtualExtruderPlan(palette, currentPhysicalSlots, {
       maxComponents: appliedColourAssignmentMode === "physical-only" ? 1 : appliedMaxVirtualMixComponents,
       virtualStartId: physicalExtruders + 1,
       purePhysicalThreshold: 0.985,
@@ -3678,6 +3712,8 @@ export default function App({
       colourDifferenceMetric: appliedColourDifferenceMetric,
       previewLightnessOffset: appliedVirtualPreviewLightness,
     });
+    baseVirtualExtruderPlanRef.current = plan;
+    return plan;
   }, [
     currentPhysicalSlots,
     palette,
@@ -3776,6 +3812,7 @@ export default function App({
     clearPreviewProgressFallback();
     waitingForPreviewAfterApplyRef.current = false;
     waitingForPreviewAfterPaletteApplyRef.current = false;
+    deferVirtualPlanUntilPaletteRef.current = false;
     waitingForThreePreviewProgressRef.current = false;
     setProgressRun(null);
     setModel(null);
