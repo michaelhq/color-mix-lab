@@ -4,7 +4,7 @@
 
 **Try the live app:** [Color Mix Lab Github Page](https://michaelhq.github.io/color-mix-lab/)
 
-**Download the bust of Nefertiti Color Mix Lab project files:** [Nefertiti ColorMix - created with Color Mix Lab](https://www.printables.com/model/1764574-nefertiti-colormix-created-with-color-mix-lab/)
+**Download the bust of Nefertiti Colot Mix Lab project files:** [Nefertiti ColorMix - created with Color Mix Lab](https://www.printables.com/model/1764574-nefertiti-colormix-created-with-color-mix-lab/)
 
 It is an experimental lab and reference workflow for preparing colour-rich 3D models for PrusaSlicer ColorMix / virtual extruder workflows.
 
@@ -194,9 +194,11 @@ It is meant to be closer to the PrusaSlicer / ColorMix concept than a simple RGB
 
 ### Prusa FDM Mixer preview model
 
-Color Mix Lab’s preview logic is based on the idea of Prusa’s `prusa-fdm-mixer` model rather than a simple RGB or sRGB layer average.
+Color Mix Lab uses a local, dependency-free implementation of Prusa’s calibrated `prusa-fdm-mixer` v7 model rather than a simple RGB or sRGB layer average. The implementation is kept inside Color Mix Lab and was verified against the current upstream TypeScript reference predictions for version 0.8.3.
 
 This matters because FDM colour mixing is not just a mathematical RGB blend. Real filament mixing is affected by material behaviour, layer interaction, pigment strength, and the way the slicer represents virtual mixes.
+
+Palette mapping can use either **CIE76 (ΔE76 – Euclidean LAB)** or **CIEDE2000 (ΔE00 – Perceptual)**. **CIE** refers to the *Commission Internationale de l’Éclairage* (International Commission on Illumination), which standardises colour spaces and colour-difference methods. CIE76 was introduced with CIELAB in 1976 and calculates the straight-line Euclidean distance between two Lab colours, treating differences in L* (lightness), a* (green–red) and b* (blue–yellow) equally. CIEDE2000 is the CIE Delta E 2000 formula and applies perceptual corrections to lightness, chroma and hue because equal numerical distances in CIELAB are not perceived equally in every colour region. **CIEDE2000 is the default**. This selection changes how target colours are matched to printable physical and virtual mixtures; it does not change the FDM mixing model itself.
 
 The preview should therefore be understood as a slicer-oriented approximation, not as an exact optical simulation.
 

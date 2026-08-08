@@ -9,6 +9,7 @@ import type {
   AccentProtectionMode,
   ColourAdjustments,
   ColourAssignmentMode,
+  ColourDifferenceMetric,
   Filament,
   MappingStrategyMode,
   MixingRecipeResolution,
@@ -430,6 +431,12 @@ function isMappingStrategyMode(value: unknown): value is MappingStrategyMode {
     value === "preserve-accent" ||
     value === "warm-neutral"
   );
+}
+
+function isColourDifferenceMetric(
+  value: unknown,
+): value is ColourDifferenceMetric {
+  return value === "cie76" || value === "ciede2000";
 }
 
 function normalizeVirtualPreviewLightness(
@@ -1681,6 +1688,10 @@ export default function App({
     useState<MappingStrategyMode>("closest");
   const [appliedMappingStrategy, setAppliedMappingStrategy] =
     useState<MappingStrategyMode>("closest");
+  const [pendingColourDifferenceMetric, setPendingColourDifferenceMetric] =
+    useState<ColourDifferenceMetric>("ciede2000");
+  const [appliedColourDifferenceMetric, setAppliedColourDifferenceMetric] =
+    useState<ColourDifferenceMetric>("ciede2000");
   const [pendingVirtualPreviewLightness, setPendingVirtualPreviewLightness] =
     useState(0);
   const [appliedVirtualPreviewLightness, setAppliedVirtualPreviewLightness] =
@@ -2631,6 +2642,8 @@ export default function App({
       appliedVirtualMixPriority,
       pendingMappingStrategy,
       appliedMappingStrategy,
+      pendingColourDifferenceMetric,
+      appliedColourDifferenceMetric,
       pendingVirtualPreviewLightness,
       appliedVirtualPreviewLightness,
       pendingAdjustments,
@@ -2838,6 +2851,16 @@ export default function App({
     )
       ? settings.appliedMappingStrategy
       : nextPendingMappingStrategy;
+    const nextPendingColourDifferenceMetric = isColourDifferenceMetric(
+      settings.pendingColourDifferenceMetric,
+    )
+      ? settings.pendingColourDifferenceMetric
+      : "ciede2000";
+    const nextAppliedColourDifferenceMetric = isColourDifferenceMetric(
+      settings.appliedColourDifferenceMetric,
+    )
+      ? settings.appliedColourDifferenceMetric
+      : nextPendingColourDifferenceMetric;
     const nextPendingVirtualPreviewLightness = normalizeVirtualPreviewLightness(
       settings.pendingVirtualPreviewLightness,
       pendingVirtualPreviewLightness,
@@ -3030,6 +3053,8 @@ export default function App({
     setAppliedVirtualMixPriority(nextAppliedVirtualMixPriority);
     setPendingMappingStrategy(nextPendingMappingStrategy);
     setAppliedMappingStrategy(nextAppliedMappingStrategy);
+    setPendingColourDifferenceMetric(nextPendingColourDifferenceMetric);
+    setAppliedColourDifferenceMetric(nextAppliedColourDifferenceMetric);
     setPendingVirtualPreviewLightness(nextPendingVirtualPreviewLightness);
     setAppliedVirtualPreviewLightness(nextAppliedVirtualPreviewLightness);
     setPendingAdjustments((prev) =>
@@ -3397,6 +3422,7 @@ export default function App({
     pendingAccentProtection !== appliedAccentProtection ||
     pendingVirtualMixPriority !== appliedVirtualMixPriority ||
     pendingMappingStrategy !== appliedMappingStrategy ||
+    pendingColourDifferenceMetric !== appliedColourDifferenceMetric ||
     pendingVirtualPreviewLightness !== appliedVirtualPreviewLightness;
 
   function normalizeMaxColours(value: number): number {
@@ -3428,6 +3454,11 @@ export default function App({
     const nextMappingStrategy = isMappingStrategyMode(pendingMappingStrategy)
       ? pendingMappingStrategy
       : "closest";
+    const nextColourDifferenceMetric = isColourDifferenceMetric(
+      pendingColourDifferenceMetric,
+    )
+      ? pendingColourDifferenceMetric
+      : "ciede2000";
     const nextVirtualPreviewLightness = normalizeVirtualPreviewLightness(
       pendingVirtualPreviewLightness,
       0,
@@ -3439,6 +3470,7 @@ export default function App({
     setPendingAccentProtection(nextAccentProtection);
     setPendingVirtualMixPriority(nextVirtualMixPriority);
     setPendingMappingStrategy(nextMappingStrategy);
+    setPendingColourDifferenceMetric(nextColourDifferenceMetric);
     setPendingVirtualPreviewLightness(nextVirtualPreviewLightness);
     if (!model) {
       setAppliedMaxColours(next);
@@ -3448,6 +3480,7 @@ export default function App({
       setAppliedAccentProtection(nextAccentProtection);
       setAppliedVirtualMixPriority(nextVirtualMixPriority);
       setAppliedMappingStrategy(nextMappingStrategy);
+      setAppliedColourDifferenceMetric(nextColourDifferenceMetric);
       setAppliedVirtualPreviewLightness(nextVirtualPreviewLightness);
       return;
     }
@@ -3469,6 +3502,7 @@ export default function App({
       setAppliedAccentProtection(nextAccentProtection);
       setAppliedVirtualMixPriority(nextVirtualMixPriority);
       setAppliedMappingStrategy(nextMappingStrategy);
+      setAppliedColourDifferenceMetric(nextColourDifferenceMetric);
       setAppliedVirtualPreviewLightness(nextVirtualPreviewLightness);
     }, 40);
   }
@@ -3481,6 +3515,7 @@ export default function App({
     setPendingAccentProtection(appliedAccentProtection);
     setPendingVirtualMixPriority(appliedVirtualMixPriority);
     setPendingMappingStrategy(appliedMappingStrategy);
+    setPendingColourDifferenceMetric(appliedColourDifferenceMetric);
     setPendingVirtualPreviewLightness(appliedVirtualPreviewLightness);
   }
 
@@ -3640,6 +3675,7 @@ export default function App({
       accentProtection: appliedAccentProtection,
       mixPriority: appliedVirtualMixPriority,
       mappingStrategy: appliedMappingStrategy,
+      colourDifferenceMetric: appliedColourDifferenceMetric,
       previewLightnessOffset: appliedVirtualPreviewLightness,
     });
   }, [
@@ -3652,6 +3688,7 @@ export default function App({
     appliedAccentProtection,
     appliedVirtualMixPriority,
     appliedMappingStrategy,
+    appliedColourDifferenceMetric,
     appliedVirtualPreviewLightness,
   ]);
 
@@ -4841,6 +4878,30 @@ export default function App({
                     </option>
                     <option value="avoid-muddy">
                       {t.mixPriorityAvoidMuddy}
+                    </option>
+                  </select>
+                </label>
+
+                <label
+                  className="inline-row"
+                  title={t.tipColourDifferenceMetric}
+                >
+                  <HelpLabel title={t.tipColourDifferenceMetric}>
+                    {t.colourDifferenceMetric}
+                  </HelpLabel>
+                  <select
+                    value={pendingColourDifferenceMetric}
+                    onChange={(e) =>
+                      setPendingColourDifferenceMetric(
+                        isColourDifferenceMetric(e.target.value)
+                          ? e.target.value
+                          : "ciede2000",
+                      )
+                    }
+                  >
+                    <option value="cie76">{t.colourDifferenceCie76}</option>
+                    <option value="ciede2000">
+                      {t.colourDifferenceCiede2000}
                     </option>
                   </select>
                 </label>

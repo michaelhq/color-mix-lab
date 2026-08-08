@@ -1,5 +1,6 @@
 import type {
   AccentProtectionMode,
+  ColourDifferenceMetric,
   PaletteEntry,
   PhysicalSlot,
   RGB,
@@ -9,7 +10,7 @@ import type {
 } from "./types";
 import { clamp255, rgbToHex, squaredDistance } from "./colour";
 import {
-  deltaE76,
+  colourDistance,
   hueDistanceDegrees,
   labChroma,
   labHueDegrees,
@@ -82,6 +83,7 @@ export interface VirtualExtruderPlanOptions {
   accentProtection: AccentProtectionMode;
   mixPriority: VirtualMixPriorityMode;
   mappingStrategy: MappingStrategyMode;
+  colourDifferenceMetric: ColourDifferenceMetric;
   /**
    * LAB L* offset for the preview colour model. The exported layer sequence is
    * kept independent from display calibration so slicer output remains stable.
@@ -98,7 +100,8 @@ const BLEND_PERCENT_UNIT = 5;
 const BLEND_TOTAL_UNITS = Math.round(100 / BLEND_PERCENT_UNIT);
 const BLEND_WEIGHT_RESOLUTION = 64;
 const BLEND_QUANTISE_MAX_ERROR = 0.03;
-const POOR_MAPPING_DELTA_E = 18;
+const POOR_MAPPING_DELTA_E76 = 18;
+const POOR_MAPPING_DELTA_E2000 = 8;
 
 function gcd(a: number, b: number): number {
   a = Math.abs(Math.round(a));
@@ -472,6 +475,7 @@ function candidateScore(
   accentProtection: AccentProtectionMode,
   mixPriority: VirtualMixPriorityMode,
   mappingStrategy: MappingStrategyMode,
+  colourDifferenceMetric: ColourDifferenceMetric,
   targetWeightShare: number,
   previewLightnessOffset: number,
 ): number {
@@ -482,7 +486,7 @@ function candidateScore(
   void previewLightnessOffset;
   const candidateLab = candidate.fdmLab;
   const candidateRgb = candidate.fdmRgb;
-  let score = deltaE76(targetLab, candidateLab);
+  let score = colourDistance(targetLab, candidateLab, colourDifferenceMetric);
 
   const targetChroma = labChroma(targetLab);
   const candidateChroma = labChroma(candidateLab);
@@ -558,6 +562,7 @@ function bestBlendForColour(
   accentProtection: AccentProtectionMode,
   mixPriority: VirtualMixPriorityMode,
   mappingStrategy: MappingStrategyMode,
+  colourDifferenceMetric: ColourDifferenceMetric,
   targetWeightShare: number,
   previewLightnessOffset: number,
   previousSmoothLab: LAB | null = null,
@@ -579,7 +584,7 @@ function bestBlendForColour(
   let rawBestScore = Number.POSITIVE_INFINITY;
   const scored: Array<BlendCandidate & { score: number; error: number }> = [];
   for (const candidate of candidates) {
-    const error = deltaE76(targetLab, candidate.fdmLab);
+    const error = colourDistance(targetLab, candidate.fdmLab, colourDifferenceMetric);
     const score = candidateScore(
       targetRgb,
       targetLab,
@@ -587,6 +592,7 @@ function bestBlendForColour(
       accentProtection,
       mixPriority,
       mappingStrategy,
+      colourDifferenceMetric,
       targetWeightShare,
       previewLightnessOffset,
     );
@@ -602,7 +608,7 @@ function bestBlendForColour(
       previousSmoothLab &&
       candidate.score <= rawBestScore + 7
     ) {
-      score += deltaE76(previousSmoothLab, candidate.fdmLab) * 0.06;
+      score += colourDistance(previousSmoothLab, candidate.fdmLab, colourDifferenceMetric) * 0.06;
     }
     if (!best || score < best.score) best = { ...candidate, score };
   }
@@ -751,13 +757,21 @@ function comparePaletteForSmoothMapping(a: PaletteEntry, b: PaletteEntry): numbe
   return labHueDegrees(al) - labHueDegrees(bl) || al.L - bl.L || a.index - b.index;
 }
 
-function emptyMappingDiagnostics(): VirtualMappingDiagnostics {
+function poorMappingThreshold(metric: ColourDifferenceMetric): number {
+  return metric === "ciede2000"
+    ? POOR_MAPPING_DELTA_E2000
+    : POOR_MAPPING_DELTA_E76;
+}
+
+function emptyMappingDiagnostics(
+  metric: ColourDifferenceMetric = "ciede2000",
+): VirtualMappingDiagnostics {
   return {
     targetPaletteCount: 0,
     averageError: 0,
     worstError: 0,
     poorMatchCount: 0,
-    poorMatchThreshold: POOR_MAPPING_DELTA_E,
+    poorMatchThreshold: poorMappingThreshold(metric),
     collapsedTargetColours: 0,
   };
 }
@@ -776,6 +790,7 @@ export function buildVirtualExtruderPlan(
     accentProtection: options.accentProtection ?? "balanced",
     mixPriority: options.mixPriority ?? "accurate",
     mappingStrategy: options.mappingStrategy ?? "closest",
+    colourDifferenceMetric: options.colourDifferenceMetric ?? "ciede2000",
     previewLightnessOffset: Number.isFinite(options.previewLightnessOffset)
       ? Math.max(-90, Math.min(30, options.previewLightnessOffset ?? -36))
       : -36,
@@ -825,6 +840,7 @@ export function buildVirtualExtruderPlan(
       opts.accentProtection,
       opts.mixPriority,
       opts.mappingStrategy,
+      opts.colourDifferenceMetric,
       Math.max(0, p.count) / totalPaletteWeight,
       opts.previewLightnessOffset,
       previousSmoothLab,
@@ -955,6 +971,7 @@ export function buildVirtualExtruderPlan(
   );
   const printableAssignmentCount = virtualBlends.length + physicalOnly.length;
   const totalErrorWeight = mappingErrors.reduce((sum, item) => sum + item.weight, 0);
+  const mappingThreshold = poorMappingThreshold(opts.colourDifferenceMetric);
   const mappingDiagnostics: VirtualMappingDiagnostics = mappingErrors.length > 0
     ? {
         targetPaletteCount: assignedTargetCount,
@@ -962,11 +979,11 @@ export function buildVirtualExtruderPlan(
           mappingErrors.reduce((sum, item) => sum + item.error * item.weight, 0) /
           Math.max(1, totalErrorWeight),
         worstError: mappingErrors.reduce((max, item) => Math.max(max, item.error), 0),
-        poorMatchCount: mappingErrors.filter((item) => item.error >= POOR_MAPPING_DELTA_E).length,
-        poorMatchThreshold: POOR_MAPPING_DELTA_E,
+        poorMatchCount: mappingErrors.filter((item) => item.error >= mappingThreshold).length,
+        poorMatchThreshold: mappingThreshold,
         collapsedTargetColours: Math.max(0, assignedTargetCount - printableAssignmentCount),
       }
-    : emptyMappingDiagnostics();
+    : emptyMappingDiagnostics(opts.colourDifferenceMetric);
   return { virtualBlends, physicalOnly, paletteToAssignment, mappingDiagnostics };
 }
 

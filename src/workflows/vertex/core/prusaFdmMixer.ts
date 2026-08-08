@@ -1,7 +1,8 @@
-import type { RGB } from './types';
+import type { ColourDifferenceMetric, RGB } from './types';
 
 /**
  * Adapted from prusa3d/prusa-fdm-mixer (MIT), calibration v7.
+ * Verified against the upstream TypeScript v7 implementation on 2026-08-08.
  * Copyright (c) 2026 Ondrej Bartas (Prusa Research s.r.o.) and contributors.
  *
  * This local copy avoids an additional runtime dependency and keeps Color Mix Lab
@@ -154,16 +155,99 @@ export function deltaE76(a: LAB, b: LAB): number {
   return Math.sqrt(dL * dL + da * da + db * db);
 }
 
+export function deltaE2000(lab1: LAB, lab2: LAB): number {
+  const { L: L1, a: a1, b: b1 } = lab1;
+  const { L: L2, a: a2, b: b2 } = lab2;
+
+  const avgL = (L1 + L2) / 2;
+  const C1 = Math.hypot(a1, b1);
+  const C2 = Math.hypot(a2, b2);
+  const avgC = (C1 + C2) / 2;
+  const avgC7 = Math.pow(avgC, 7);
+  const twentyFive7 = Math.pow(25, 7);
+  const G = 0.5 * (1 - Math.sqrt(avgC7 / (avgC7 + twentyFive7)));
+
+  const a1p = (1 + G) * a1;
+  const a2p = (1 + G) * a2;
+  const C1p = Math.hypot(a1p, b1);
+  const C2p = Math.hypot(a2p, b2);
+  const avgCp = (C1p + C2p) / 2;
+
+  const h1p = ((Math.atan2(b1, a1p) * 180) / Math.PI + 360) % 360;
+  const h2p = ((Math.atan2(b2, a2p) * 180) / Math.PI + 360) % 360;
+  const avgHp =
+    Math.abs(h1p - h2p) > 180
+      ? (h1p + h2p + 360) / 2
+      : (h1p + h2p) / 2;
+
+  const T =
+    1 -
+    0.17 * Math.cos(((avgHp - 30) * Math.PI) / 180) +
+    0.24 * Math.cos((2 * avgHp * Math.PI) / 180) +
+    0.32 * Math.cos(((3 * avgHp + 6) * Math.PI) / 180) -
+    0.2 * Math.cos(((4 * avgHp - 63) * Math.PI) / 180);
+
+  let dhp = h2p - h1p;
+  if (Math.abs(dhp) > 180) dhp -= dhp > 0 ? 360 : -360;
+
+  const dLp = L2 - L1;
+  const dCp = C2p - C1p;
+  const dHp =
+    2 * Math.sqrt(C1p * C2p) * Math.sin(((dhp / 2) * Math.PI) / 180);
+  const SL =
+    1 +
+    (0.015 * Math.pow(avgL - 50, 2)) /
+      Math.sqrt(20 + Math.pow(avgL - 50, 2));
+  const SC = 1 + 0.045 * avgCp;
+  const SH = 1 + 0.015 * avgCp * T;
+
+  const dTheta = 30 * Math.exp(-Math.pow((avgHp - 275) / 25, 2));
+  const avgCp7 = Math.pow(avgCp, 7);
+  const RC = 2 * Math.sqrt(avgCp7 / (avgCp7 + twentyFive7));
+  const RT = -RC * Math.sin((2 * dTheta * Math.PI) / 180);
+
+  return Math.sqrt(
+    Math.pow(dLp / SL, 2) +
+      Math.pow(dCp / SC, 2) +
+      Math.pow(dHp / SH, 2) +
+      RT * (dCp / SC) * (dHp / SH),
+  );
+}
+
+export function colourDistance(
+  a: LAB,
+  b: LAB,
+  metric: ColourDifferenceMetric,
+): number {
+  return metric === 'ciede2000' ? deltaE2000(a, b) : deltaE76(a, b);
+}
+
 export function hueDistanceDegrees(a: number, b: number): number {
   const d = Math.abs(a - b) % 360;
   return Math.min(d, 360 - d);
 }
 
 function normaliseParts(parts: FilamentMixPart[]): FilamentMixPart[] {
-  const cleaned = parts.filter((part) => part.ratio > 0);
-  const total = cleaned.reduce((sum, part) => sum + part.ratio, 0);
-  if (total <= 0) throw new Error('mixFilamentsRgb: ratios must sum to a positive value');
-  return cleaned.map((part) => ({ rgb: part.rgb, ratio: part.ratio / total }));
+  if (parts.length === 0) {
+    throw new Error('mixFilamentsRgb: parts must not be empty');
+  }
+  const total = parts.reduce((sum, part) => sum + part.ratio, 0);
+  if (total <= 0) {
+    throw new Error('mixFilamentsRgb: ratios must sum to a positive value');
+  }
+  return parts.map((part) => {
+    if (part.ratio < 0) {
+      throw new Error('mixFilamentsRgb: ratios must not be negative');
+    }
+    return {
+      rgb: [
+        clamp255(part.rgb[0]),
+        clamp255(part.rgb[1]),
+        clamp255(part.rgb[2]),
+      ] as RGB,
+      ratio: part.ratio / total,
+    };
+  });
 }
 
 export function mixFilamentsRgb(parts: FilamentMixPart[]): FdmMixResult {
@@ -177,7 +261,14 @@ export function mixFilamentsRgb(parts: FilamentMixPart[]): FdmMixResult {
 
   const params = DEFAULT_V7_PARAMS;
   const baseRgb = yuleNielsenMix(normalized, params.YN_N);
-  const baseLab = rgbToLab(baseRgb);
+  // Upstream calibration v7 converts the Yule-Nielsen result through 8-bit
+  // sRGB before the empirical LAB corrections. Preserve that rounding step so
+  // Color Mix Lab produces the same reference predictions.
+  const baseLab = rgbToLab([
+    clamp255(baseRgb[0]),
+    clamp255(baseRgb[1]),
+    clamp255(baseRgb[2]),
+  ]);
 
   const Ls = normalized.map((part) => rgbToLab(part.rgb).L);
   const lGap = Math.max(...Ls) - Math.min(...Ls);

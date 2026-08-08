@@ -65,6 +65,9 @@ const en: Dict = {
   mixPriorityAccurate: "Prusa FDM mixer",
   mixPriorityPreserveHue: "Prusa FDM + hue guard",
   mixPriorityAvoidMuddy: "Prusa FDM + accent split",
+  colourDifferenceMetric: "Colour difference",
+  colourDifferenceCie76: "CIE76 (ΔE76 – Euclidean LAB)",
+  colourDifferenceCiede2000: "CIEDE2000 (ΔE00 – Perceptual)",
   mappingStrategy: "Mapping strategy",
   mappingClosest: "Closest match",
   mappingSmooth: "Smooth transitions",
@@ -344,6 +347,8 @@ const en: Dict = {
     "Controls how strongly small but visually distinct accent colours are preserved through palette reduction, palette matching, virtual-mix selection and print simulation. Off favours maximum reduction. Balanced is the default. Strong reserves more chromatic accents and merges larger similar areas more readily.",
   tipVirtualMixPriority:
     "Controls the colour model and conservative hue/accent guards used while selecting printable virtual mixtures. The calibrated Prusa FDM mixer remains the base model instead of a simple RGB layer average.",
+  tipColourDifferenceMetric:
+    "Selects how colour differences are measured when matching reduced target colours to printable physical and virtual mixtures. CIE76 (ΔE76) measures the straight-line Euclidean distance between two colours in the 1976 CIELAB space, treating differences in L* (lightness), a* (green–red) and b* (blue–yellow) equally. It is a simple, transparent geometric distance, but equal numerical distances are not perceived equally across all colour regions. CIEDE2000 (ΔE00) compensates for this by perceptually weighting lightness, chroma and hue and is the default. The Prusa FDM mixing model itself is unchanged.",
   tipMappingStrategy:
     "Controls how reduced target-palette colours are mapped to printable physical or virtual blends. Closest match minimizes individual colour error. Smooth transitions favours more continuous printable colours between neighbouring target tones. Warm/neutral-preserving penalizes green/olive drift for brown, orange, skin and rust tones and keeps low-saturation colours closer in lightness and neutrality. Hue-preserving penalizes wrong hue direction. Accent-preserving protects small saturated target colours during mapping.",
   tipVirtualPreviewLightness:
@@ -583,7 +588,7 @@ const en: Dict = {
   poorMatches: "Poor matches",
   collapsedTargetColours: "Collapsed target colours",
   tipMappingDiagnostics:
-    "Perceptual LAB diagnostics for mapping the reduced target palette to printable physical and virtual blends. High values usually mean that the selected physical colours or coarse mixing step cannot represent parts of the palette well.",
+    "LAB diagnostics for mapping the reduced target palette to printable physical and virtual blends, using the selected colour-difference metric. High values usually mean that the selected physical colours or coarse mixing step cannot represent parts of the palette well.",
   moreVirtualBlends: "more virtual blends",
   noLayerSequencePlan:
     "Load a model and select physical colours to calculate effective layer sequences.",
