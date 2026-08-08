@@ -799,12 +799,25 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
       };
       controls.addEventListener("change", emitSyncState);
 
+      let resizeFrame: number | null = null;
       const resize = () => {
-        const width = Math.max(320, mount.clientWidth);
-        const height = Math.max(260, mount.clientHeight);
-        renderer.setSize(width, height, false);
-        camera.aspect = width / height;
-        camera.updateProjectionMatrix();
+        if (resizeFrame !== null) {
+          window.cancelAnimationFrame(resizeFrame);
+        }
+        resizeFrame = window.requestAnimationFrame(() => {
+          resizeFrame = null;
+          const rect = mount.getBoundingClientRect();
+          const width = Math.max(1, Math.round(rect.width));
+          const height = Math.max(1, Math.round(rect.height));
+
+          // Keep the WebGL drawing buffer and its CSS presentation at exactly
+          // the same aspect ratio. A percentage-sized canvas can otherwise be
+          // rescaled independently by the responsive grid, which visibly
+          // distorts the VertexColor model on narrow preview cells.
+          renderer.setSize(width, height, true);
+          camera.aspect = width / height;
+          camera.updateProjectionMatrix();
+        });
       };
       resize();
       const observer = new ResizeObserver(resize);
@@ -836,6 +849,10 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
         if (materialUpdateTimerRef.current !== null)
           window.clearTimeout(materialUpdateTimerRef.current);
         observer.disconnect();
+        if (resizeFrame !== null) {
+          window.cancelAnimationFrame(resizeFrame);
+          resizeFrame = null;
+        }
         controls.dispose();
         if (meshRef.current) {
           scene.remove(meshRef.current);

@@ -1858,7 +1858,6 @@ button.secondary.compact {
 .cml-texture-pane .warning-list.compact { margin-top: 12px; }
 
 @media (max-width: 1500px){
-  .cml-texture-pane .preview-grid { grid-template-columns: minmax(0, 1fr); }
   .cml-texture-pane { min-width: 1040px; }
 }
 
@@ -3141,6 +3140,48 @@ textarea { font: inherit; }
   width: 70px !important;
 }
 
+/* v0.7.58: colour-correction sliders must respond to the actual settings-card
+   width, not only to the browser viewport. This matters when the desktop
+   settings pane is manually narrowed with the resizer. */
+.cml-vertex-pane .colour-correction-card,
+.cml-texture-pane .texture-correction-section {
+  container-type: inline-size;
+}
+
+@container (max-width: 480px) {
+  .cml-vertex-pane .colour-correction-card .slider-row,
+  .cml-texture-pane .texture-correction-row {
+    grid-template-columns: minmax(0, 1fr) 70px !important;
+    grid-template-areas:
+      "label label"
+      "slider number" !important;
+    column-gap: 10px !important;
+    row-gap: 6px !important;
+    align-items: center !important;
+  }
+
+  .cml-vertex-pane .colour-correction-card .slider-row > .help-label,
+  .cml-texture-pane .texture-correction-row > .info-label {
+    grid-area: label !important;
+    min-width: 0 !important;
+    white-space: normal !important;
+  }
+
+  .cml-vertex-pane .colour-correction-card .slider-row > .slider-control,
+  .cml-texture-pane .texture-correction-row > .slider-control {
+    grid-area: slider !important;
+    min-width: 0 !important;
+    width: 100% !important;
+  }
+
+  .cml-vertex-pane .colour-correction-card .slider-row > .number,
+  .cml-texture-pane .texture-correction-row > .number {
+    grid-area: number !important;
+    width: 70px !important;
+    min-width: 0 !important;
+  }
+}
+
 /* v0.7.52: VertexColor split comparison preview. */
 .cml-vertex-pane .vertex-preview-grid {
   display: grid;
@@ -3164,4 +3205,248 @@ textarea { font: inherit; }
   font-size: 0.88rem;
   font-weight: 800;
   padding: 0 2px;
+}
+
+/* v0.7.54: responsive shell/workflow layout.
+   On narrow viewports the settings area is followed by the preview instead of
+   forcing the desktop columns beyond the visible viewport. */
+@media (max-width: 1100px) {
+  .cml-shell {
+    grid-template-rows: auto minmax(0, 1fr) 34px !important;
+  }
+
+  .cml-appbar {
+    height: auto !important;
+    min-height: 58px !important;
+    overflow: visible !important;
+    grid-template-columns: auto minmax(0, 1fr) !important;
+    grid-template-areas:
+      "brand controls"
+      "switch switch" !important;
+    row-gap: 8px !important;
+    padding: 10px 14px !important;
+  }
+
+  .cml-brand-inline {
+    grid-area: brand;
+    min-width: 0;
+  }
+
+  .cml-workflow-switch {
+    grid-area: switch;
+    width: 100%;
+    overflow: visible !important;
+  }
+
+  .cml-workflow-switch button {
+    flex: 0 1 auto;
+    max-width: none !important;
+    min-width: 0 !important;
+  }
+
+  .cml-workflow-label {
+    overflow-wrap: normal !important;
+    word-break: normal !important;
+    white-space: nowrap !important;
+  }
+
+  .cml-global-controls {
+    grid-area: controls;
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  .cml-main {
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+  }
+
+  .cml-workflow-pane,
+  .cml-main .app {
+    height: auto !important;
+    min-height: 100% !important;
+    overflow: visible !important;
+  }
+
+  .cml-main .layout,
+  .cml-texture-pane .layout,
+  .cml-vertex-pane .layout {
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: auto auto !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    padding: 12px !important;
+    /* v0.7.56: keep the stacked settings-to-preview spacing compact and
+       visually aligned with the navigation-to-settings spacing above. */
+    gap: 8px !important;
+  }
+
+  .cml-texture-pane {
+    min-width: 0 !important;
+  }
+
+  .cml-main .layout-resizer,
+  .cml-texture-pane .layout-resizer,
+  .cml-vertex-pane .layout-resizer {
+    display: none !important;
+  }
+
+  .cml-texture-pane .left-panel,
+  .cml-vertex-pane .left-panel,
+  .cml-main .left-panel {
+    width: 100% !important;
+    max-width: none !important;
+    min-width: 0 !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+
+  /* v0.7.55: once the workflow itself stacks, stack navigation above the
+     active settings card as well. This avoids an unnecessary narrow
+     navigation/content split before the compact mobile layout is reached. */
+  .cml-main .tabbed-panel,
+  .cml-texture-pane .texture-tabbed-panel,
+  .cml-main .left-panel.tabbed-panel {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 10px !important;
+    height: auto !important;
+    min-height: 0 !important;
+    align-items: start !important;
+  }
+
+  .cml-main .sidebar-tabs,
+  .cml-texture-pane .texture-tabs,
+  .cml-texture-pane .sidebar-tabs {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 5px !important;
+    padding: 6px !important;
+    height: max-content !important;
+    min-height: 0 !important;
+    align-self: start !important;
+    overflow: visible !important;
+  }
+
+  .cml-main .tab-content,
+  .cml-texture-pane .texture-tab-content,
+  .cml-texture-pane .tab-content {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    padding-right: 0 !important;
+  }
+
+  /* v0.7.57: the normal desktop cards carry a 14px bottom margin. In the
+     stacked layout that margin was added on top of the layout gap, making
+     settings-to-preview spacing visibly larger than navigation-to-settings. */
+  .cml-main .tab-content > .card,
+  .cml-texture-pane .texture-tab-content > .card,
+  .cml-texture-pane .tab-content > .card,
+  .cml-vertex-pane .tab-content > .card {
+    margin-bottom: 0 !important;
+  }
+
+  .cml-texture-pane .preview-panel,
+  .cml-vertex-pane .preview-panel,
+  .cml-main .preview-panel {
+    width: 100% !important;
+    height: min(72vh, 760px) !important;
+    min-height: 520px !important;
+  }
+
+  .cml-texture-pane .preview-grid,
+  .cml-vertex-pane .vertex-preview-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+  }
+}
+
+@media (max-width: 760px) {
+  .cml-shell {
+    --cml-font-size: 13px;
+  }
+
+  .cml-appbar {
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-areas:
+      "brand"
+      "switch"
+      "controls" !important;
+    gap: 8px !important;
+    padding: 9px 10px !important;
+  }
+
+  .cml-brand-inline strong {
+    font-size: 1.28rem;
+  }
+
+  .cml-global-controls {
+    justify-content: flex-start !important;
+    width: 100%;
+  }
+
+  .cml-workflow-switch {
+    gap: 6px !important;
+  }
+
+  .cml-workflow-switch button {
+    flex: 1 1 0;
+    padding-inline: 0.55rem !important;
+  }
+
+  .cml-main .tabbed-panel,
+  .cml-texture-pane .texture-tabbed-panel,
+  .cml-main .left-panel.tabbed-panel {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 10px !important;
+  }
+
+  .cml-main .sidebar-tabs,
+  .cml-texture-pane .texture-tabs,
+  .cml-texture-pane .sidebar-tabs {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 5px !important;
+    padding: 6px !important;
+  }
+
+  .cml-main .sidebar-tabs button,
+  .cml-texture-pane .texture-tabs button,
+  .cml-texture-pane .sidebar-tabs button {
+    min-height: 32px !important;
+    padding: 0.5rem 0.6rem !important;
+    font-size: 0.82rem !important;
+  }
+
+  .cml-texture-pane .preview-panel,
+  .cml-vertex-pane .preview-panel,
+  .cml-main .preview-panel {
+    height: 64vh !important;
+    min-height: 460px !important;
+  }
+}
+
+/* v0.7.60: portrait-phone preview layout.
+   On very narrow portrait viewports, stack the two comparison previews so
+   each model keeps a useful display width. Wider and landscape layouts remain
+   side by side. */
+@media (max-width: 600px) and (orientation: portrait) {
+  .cml-texture-pane .preview-panel,
+  .cml-vertex-pane .preview-panel,
+  .cml-main .preview-panel {
+    height: auto !important;
+    min-height: 0 !important;
+  }
+
+  .cml-texture-pane .preview-surface-card,
+  .cml-vertex-pane .preview-surface-card,
+  .cml-texture-pane .preview-surface-card.texture-preview-surface-card {
+    height: auto !important;
+  }
+
+  .cml-texture-pane .preview-grid,
+  .cml-vertex-pane .vertex-preview-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+    height: auto !important;
+  }
 }

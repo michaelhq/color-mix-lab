@@ -5295,7 +5295,7 @@ export default function App({
             )}
 
             {activeTab === "adjustment" && (
-              <section className="card tab-card workflow-card">
+              <section className="card tab-card workflow-card colour-correction-card">
                 <h2>{t.modelColourCorrection}</h2>
                 <p className="muted workflow-intro">
                   {t.modelColourCorrectionIntro}

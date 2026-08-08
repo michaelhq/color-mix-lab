@@ -1,7 +1,7 @@
 {
   "name": "color-mix-lab",
   "private": true,
-  "version": "0.7.52",
+  "version": "0.7.60",
   "type": "module",
   "license": "MIT",
   "scripts": {
