@@ -204,7 +204,7 @@ function buildWarnings(diagnostics: Omit<MeshDiagnostics, 'warnings'>): string[]
   if (diagnostics.duplicateFaces > 0) warnings.push('Duplicate faces found.');
   if (diagnostics.trianglesWithoutUV > 0) warnings.push('Some triangles have no UV coordinates and cannot be baked from the texture.');
   if (diagnostics.textureCount === 0) warnings.push('No base-colour texture found. Baking will use material colours or vertex colours as fallback.');
-  if (diagnostics.normalMapCount + diagnostics.bumpMapCount + diagnostics.displacementMapCount > 0) warnings.push('Normal/bump/height maps found. They are not baked as print colours. Bump/height maps can be used experimentally for relief geometry.');
+  if (diagnostics.normalMapCount + diagnostics.bumpMapCount + diagnostics.displacementMapCount > 0) warnings.push('Normal/bump/height maps found. They are not baked as print colours. Bump/height maps can be used experimentally for relief geometry, and normal maps can be reconstructed experimentally as relief.');
   if (diagnostics.roughnessMapCount + diagnostics.metalnessMapCount > 0) warnings.push('Roughness/metalness maps found. They are not colour information; at most they can be used as detail indicators for subdivision.');
   if (diagnostics.emissiveMapCount > 0) warnings.push('Emissive textures found. They can optionally be included as a visible colour source during baking.');
   if (diagnostics.alphaBlendMaterialCount + diagnostics.alphaMaskMaterialCount + diagnostics.alphaMapCount > 0) warnings.push('Alpha/transparency materials found. Visible colours can depend on overlays; base-colour-only baking can differ.');
@@ -218,7 +218,16 @@ function buildWarnings(diagnostics: Omit<MeshDiagnostics, 'warnings'>): string[]
 export function analyzeScene(scene: THREE.Object3D, fileName: string): MeshDiagnostics {
   scene.updateMatrixWorld(true);
 
-  const box = new THREE.Box3().setFromObject(scene);
+  const box = new THREE.Box3();
+  scene.traverse((object) => {
+    if (!(object instanceof THREE.Mesh) || !object.visible) return;
+    const geometry = object.geometry;
+    if (!geometry) return;
+    if (!geometry.boundingBox) geometry.computeBoundingBox();
+    const geometryBox = geometry.boundingBox;
+    if (!geometryBox || geometryBox.isEmpty()) return;
+    box.union(geometryBox.clone().applyMatrix4(object.matrixWorld));
+  });
   const boxSize = new THREE.Vector3();
   const boxMin = new THREE.Vector3();
   const boxMax = new THREE.Vector3();
@@ -283,7 +292,7 @@ export function analyzeScene(scene: THREE.Object3D, fileName: string): MeshDiagn
   const c = new THREE.Vector3();
 
   scene.traverse((object) => {
-    if (!(object instanceof THREE.Mesh)) return;
+    if (!(object instanceof THREE.Mesh) || !object.visible) return;
 
     meshCount += 1;
     if (object instanceof THREE.SkinnedMesh) skinnedMeshCount += 1;

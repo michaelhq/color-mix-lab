@@ -9,11 +9,22 @@ export type ColourDifferenceMetric = 'cie76' | 'ciede2000';
 export type ColourAssignmentMode = 'physical-only' | 'physical-and-virtual';
 export type MixingRecipeResolution = 'grid5' | 'grid10' | 'grid20' | 'grid25' | 'thirds' | 'half-thirds';
 
+export interface MeshPart {
+  id: string;
+  name: string;
+  triangleCount: number;
+  source: 'object' | 'group' | 'single';
+}
+
 export interface MeshModel {
   name: string;
   vertices: Vec3[];
   triangles: Tri[];
   triangleColors: RGB[];
+  /** Logical OBJ parts detected from `o` sections, or `g` sections as fallback. */
+  parts: MeshPart[];
+  /** Part index for each triangle. Kept compact because large vertex-colour OBJ files can contain millions of faces. */
+  trianglePartIndices: Uint32Array;
   /** Optional per-source-vertex colours. Normally omitted after parsing to reduce Chromium memory pressure. */
   vertexColors?: Array<RGB | null>;
   stats: {

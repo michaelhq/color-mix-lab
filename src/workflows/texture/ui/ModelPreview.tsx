@@ -6,6 +6,7 @@ import {
   addSharedPreviewLights,
   configurePreviewRenderer,
   makeFlatPreviewMaterial,
+  makeNeutralShadedPreviewMaterial,
   type PreviewDisplayMode,
 } from "../../common/previewRendering";
 
@@ -89,6 +90,7 @@ interface ModelPreviewProps {
   onSyncChange?: (state: CameraSyncState) => void;
   colourCorrection?: TextureColourCorrection | null;
   displayMode?: PreviewDisplayMode;
+  surfaceHighlights?: boolean;
 }
 
 
@@ -218,14 +220,33 @@ type PreviewMaterialSet = THREE.Material | THREE.Material[];
 interface PreviewMaterialVariant {
   mesh: THREE.Mesh;
   shaded: PreviewMaterialSet;
+  highlighted: PreviewMaterialSet;
   flat: PreviewMaterialSet;
 }
 
 function buildPreviewMaterialVariants(
   root: THREE.Object3D,
 ): PreviewMaterialVariant[] {
+  const shadedMaterialCache = new Map<THREE.Material, THREE.Material>();
+  const highlightedMaterialCache = new Map<THREE.Material, THREE.Material>();
   const flatMaterialCache = new Map<THREE.Material, THREE.Material>();
   const variants: PreviewMaterialVariant[] = [];
+
+  const shadedMaterial = (material: THREE.Material): THREE.Material => {
+    const cached = shadedMaterialCache.get(material);
+    if (cached) return cached;
+    const shaded = makeNeutralShadedPreviewMaterial(material);
+    shadedMaterialCache.set(material, shaded);
+    return shaded;
+  };
+
+  const highlightedMaterial = (material: THREE.Material): THREE.Material => {
+    const cached = highlightedMaterialCache.get(material);
+    if (cached) return cached;
+    const highlighted = makeNeutralShadedPreviewMaterial(material, true);
+    highlightedMaterialCache.set(material, highlighted);
+    return highlighted;
+  };
 
   const flatMaterial = (material: THREE.Material): THREE.Material => {
     const cached = flatMaterialCache.get(material);
@@ -237,11 +258,17 @@ function buildPreviewMaterialVariants(
 
   root.traverse((object) => {
     if (!(object instanceof THREE.Mesh)) return;
-    const shaded = object.material;
-    const flat = Array.isArray(shaded)
-      ? shaded.map(flatMaterial)
-      : flatMaterial(shaded);
-    variants.push({ mesh: object, shaded, flat });
+    const source = object.material;
+    const shaded = Array.isArray(source)
+      ? source.map(shadedMaterial)
+      : shadedMaterial(source);
+    const highlighted = Array.isArray(source)
+      ? source.map(highlightedMaterial)
+      : highlightedMaterial(source);
+    const flat = Array.isArray(source)
+      ? source.map(flatMaterial)
+      : flatMaterial(source);
+    variants.push({ mesh: object, shaded, highlighted, flat });
   });
 
   return variants;
@@ -250,19 +277,29 @@ function buildPreviewMaterialVariants(
 function applyDisplayMode(
   variants: PreviewMaterialVariant[],
   displayMode: PreviewDisplayMode,
+  surfaceHighlights: boolean,
 ): void {
   for (const variant of variants) {
-    variant.mesh.material = displayMode === "flat" ? variant.flat : variant.shaded;
+    variant.mesh.material =
+      displayMode === "flat"
+        ? variant.flat
+        : surfaceHighlights
+          ? variant.highlighted
+          : variant.shaded;
   }
 }
 
-function disposeFlatPreviewMaterials(variants: PreviewMaterialVariant[]): void {
+function disposePreviewMaterials(variants: PreviewMaterialVariant[]): void {
   const disposed = new Set<THREE.Material>();
   for (const variant of variants) {
-    const flatMaterials = Array.isArray(variant.flat)
-      ? variant.flat
-      : [variant.flat];
-    for (const material of flatMaterials) {
+    const materials = [
+      ...(Array.isArray(variant.shaded) ? variant.shaded : [variant.shaded]),
+      ...(Array.isArray(variant.highlighted)
+        ? variant.highlighted
+        : [variant.highlighted]),
+      ...(Array.isArray(variant.flat) ? variant.flat : [variant.flat]),
+    ];
+    for (const material of materials) {
       if (disposed.has(material)) continue;
       disposed.add(material);
       material.dispose();
@@ -621,6 +658,7 @@ export default function ModelPreview({
   onSyncChange,
   colourCorrection = null,
   displayMode = "shaded",
+  surfaceHighlights = false,
 }: ModelPreviewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -635,6 +673,7 @@ export default function ModelPreview({
   const modelRootRef = useRef<THREE.Object3D | null>(null);
   const materialVariantsRef = useRef<PreviewMaterialVariant[]>([]);
   const displayModeRef = useRef<PreviewDisplayMode>(displayMode);
+  const surfaceHighlightsRef = useRef(surfaceHighlights);
   const axesRef = useRef<THREE.LineSegments | null>(null);
   const axisLabelRefs = useRef<AxisLabelRefs>({});
   const showAxisLabelsRef = useRef(showAxisLabels);
@@ -660,8 +699,13 @@ export default function ModelPreview({
 
   useEffect(() => {
     displayModeRef.current = displayMode;
-    applyDisplayMode(materialVariantsRef.current, displayMode);
-  }, [displayMode]);
+    surfaceHighlightsRef.current = surfaceHighlights;
+    applyDisplayMode(
+      materialVariantsRef.current,
+      displayMode,
+      surfaceHighlights,
+    );
+  }, [displayMode, surfaceHighlights]);
 
   useEffect(() => {
     const renderer = rendererRef.current;
@@ -765,7 +809,11 @@ export default function ModelPreview({
       modelRoot.name = "Preview root";
       applyPreviewColourCorrection(modelRoot, colourCorrection);
       materialVariantsRef.current = buildPreviewMaterialVariants(modelRoot);
-      applyDisplayMode(materialVariantsRef.current, displayModeRef.current);
+      applyDisplayMode(
+        materialVariantsRef.current,
+        displayModeRef.current,
+        surfaceHighlightsRef.current,
+      );
       modelRootRef.current = modelRoot;
       threeScene.add(modelRoot);
       const canPreserveCamera = Boolean(
@@ -846,7 +894,7 @@ export default function ModelPreview({
         axesRef.current = null;
       }
       if (modelRootRef.current) removeWireframeOverlay(modelRootRef.current);
-      disposeFlatPreviewMaterials(materialVariantsRef.current);
+      disposePreviewMaterials(materialVariantsRef.current);
       materialVariantsRef.current = [];
       modelRootRef.current = null;
       threeSceneRef.current = null;

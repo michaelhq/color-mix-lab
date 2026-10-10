@@ -1,5 +1,4 @@
 import type {
-  AccentProtectionMode,
   ColourDifferenceMetric,
   PaletteEntry,
   PhysicalSlot,
@@ -63,10 +62,32 @@ export interface VirtualMappingDiagnostics {
   collapsedTargetColours: number;
 }
 
+export interface TargetMappingRecipeComponent {
+  extruder: number;
+  ratio: number;
+  count: number;
+}
+
+export interface TargetMappingDiagnostic {
+  paletteIndex: number;
+  targetRgb: RGB;
+  targetLab: LAB;
+  assignment:
+    | { kind: "physical"; extruder: number }
+    | { kind: "virtual"; virtualId: number };
+  recipe: TargetMappingRecipeComponent[];
+  predictedRgb: RGB;
+  predictedLab: LAB;
+  deltaE: number;
+  hueShiftDegrees: number | null;
+  lightnessShift: number;
+}
+
 export interface VirtualExtruderPlan {
   virtualBlends: VirtualBlendEntry[];
   physicalOnly: PhysicalOnlyEntry[];
   mappingDiagnostics: VirtualMappingDiagnostics;
+  targetMappings: TargetMappingDiagnostic[];
   paletteToAssignment: Map<
     number,
     | { kind: "physical"; extruder: number }
@@ -80,7 +101,6 @@ export interface VirtualExtruderPlanOptions {
   purePhysicalThreshold: number;
   ratioStepPercent?: number;
   recipeResolution?: MixingRecipeResolution;
-  accentProtection: AccentProtectionMode;
   mixPriority: VirtualMixPriorityMode;
   mappingStrategy: MappingStrategyMode;
   colourDifferenceMetric: ColourDifferenceMetric;
@@ -102,6 +122,58 @@ const BLEND_WEIGHT_RESOLUTION = 64;
 const BLEND_QUANTISE_MAX_ERROR = 0.03;
 const POOR_MAPPING_DELTA_E76 = 18;
 const POOR_MAPPING_DELTA_E2000 = 8;
+
+// Coarse recipe grids can make a perceptually acceptable DeltaE match look
+// obviously wrong in the print preview: typically too dark or shifted from a
+// warm beige/orange target into olive/green. These are common plausibility
+// guards shared by every mapping strategy. Strategy-specific scoring still runs
+// first and remains the primary selector; the guards only replace a result when
+// a materially better lightness / warm-hue alternative is still close enough in
+// the underlying colour-difference metric.
+const COARSE_LIGHTNESS_GUARD_MIN_TARGET_L = 55;
+const COARSE_LIGHTNESS_GUARD_MIN_DARKENING = 4.5;
+const COARSE_LIGHTNESS_GUARD_MIN_IMPROVEMENT = 2.5;
+const COARSE_LIGHTNESS_GUARD_L_WEIGHT = 0.45;
+const COARSE_WARM_GUARD_LIGHTNESS_WEIGHT = 0.75;
+const COARSE_WARM_GUARD_GREEN_A_FREE = -2.0;
+const COARSE_WARM_GUARD_GREEN_A_WEIGHT = 1.20;
+const COMMON_WARM_GREEN_MIN_IMPROVEMENT = 0.5;
+
+function usesCoarsePerceptualGuards(
+  recipeResolution: MixingRecipeResolution,
+): boolean {
+  return (
+    recipeResolution === "grid10" ||
+    recipeResolution === "grid20" ||
+    recipeResolution === "grid25" ||
+    recipeResolution === "thirds" ||
+    recipeResolution === "half-thirds"
+  );
+}
+
+function coarseLightnessGuardBaseAllowance(
+  metric: ColourDifferenceMetric,
+): number {
+  return metric === "ciede2000" ? 5.0 : 10.0;
+}
+
+function commonWarmGreenGuardBaseAllowance(
+  metric: ColourDifferenceMetric,
+): number {
+  return metric === "ciede2000" ? 9.0 : 18.0;
+}
+
+function closestWarmGuardBaseAllowance(
+  metric: ColourDifferenceMetric,
+): number {
+  return metric === "ciede2000" ? 9.0 : 18.0;
+}
+
+function smoothTransitionScoreAllowance(
+  metric: ColourDifferenceMetric,
+): number {
+  return metric === "ciede2000" ? 3.0 : 7.0;
+}
 
 function gcd(a: number, b: number): number {
   a = Math.abs(Math.round(a));
@@ -262,10 +334,36 @@ function isWarmBrownOrangeRustTarget(lab: LAB): boolean {
   return chroma >= 8 && lab.a >= 3 && lab.b >= 6 && hue >= 22 && hue <= 82;
 }
 
-function isGreenOliveCandidate(lab: LAB): boolean {
+function isWarmClosestGuardTarget(lab: LAB): boolean {
   const chroma = labChroma(lab);
   const hue = labHueDegrees(lab);
-  return chroma >= 5 && lab.b > -4 && (lab.a < 1 || (hue >= 76 && hue <= 150));
+  return chroma >= 6 && lab.a >= -2 && lab.b >= 5 && hue >= 18 && hue <= 100;
+}
+
+function warmClosestGuardValue(
+  targetLab: LAB,
+  candidate: BlendCandidate,
+  baseDistance: number,
+): number {
+  const lightnessGap = Math.abs(candidate.fdmLab.L - targetLab.L);
+  const greenDrift = Math.max(
+    0,
+    COARSE_WARM_GUARD_GREEN_A_FREE - candidate.fdmLab.a,
+  );
+  return (
+    baseDistance +
+    candidate.complexityPenalty +
+    lightnessGap * COARSE_WARM_GUARD_LIGHTNESS_WEIGHT +
+    greenDrift * COARSE_WARM_GUARD_GREEN_A_WEIGHT
+  );
+}
+
+function isGreenOliveCandidate(lab: LAB): boolean {
+  // In CIELAB, genuinely green/olive drift is characterised by a negative a*
+  // component. Hue alone is not sufficient: yellow/ochre colours around 76-85°
+  // are warm and must not be misclassified as green merely because their Lab
+  // hue sits near the yellow/green boundary.
+  return labChroma(lab) >= 5 && lab.a < -2 && lab.b > -4;
 }
 
 function warmNeutralGuardPenalty(
@@ -333,19 +431,26 @@ function recipeResolutionFromLegacyStep(ratioStepPercent: number | undefined): M
   return "grid5";
 }
 
-function stepUnitsForRecipeResolution(recipeResolution: MixingRecipeResolution): number | null {
+function cumulativeGridStepUnits(
+  recipeResolution: MixingRecipeResolution,
+): number[] {
   switch (recipeResolution) {
-    case "grid10":
-      return 2;
-    case "grid20":
-      return 4;
-    case "grid25":
-      return 5;
     case "grid5":
-      return 1;
+      // A 5% grid already contains every coarser 10%, 20%, 25% and 50% recipe.
+      return [1];
+    case "grid10":
+      // Preserve all recipes that were available at 20% and 25% so choosing
+      // a finer grid cannot remove a previously printable coarse recipe.
+      return [2, 4, 5];
+    case "grid20":
+      // 20% and 25% are not divisor-related grids. Keep the 25% recipes as
+      // well so moving from 25% to 20% cannot make the candidate gamut worse.
+      return [4, 5];
+    case "grid25":
+      return [5];
     case "thirds":
     case "half-thirds":
-      return null;
+      return [];
   }
 }
 
@@ -387,30 +492,31 @@ function buildUnitCountCompositions(
     return out;
   }
 
-  const stepUnits = stepUnitsForRecipeResolution(recipeResolution) ?? 1;
-  const minUnits = Math.max(1, stepUnits);
-  const allowedOffGridComponents = totalUnits % stepUnits === 0 ? 0 : 1;
+  for (const stepUnits of cumulativeGridStepUnits(recipeResolution)) {
+    const minUnits = Math.max(1, stepUnits);
+    const allowedOffGridComponents = totalUnits % stepUnits === 0 ? 0 : 1;
 
-  const rec = (
-    remainingParts: number,
-    remainingUnits: number,
-    current: number[],
-  ) => {
-    if (remainingParts === 1) {
-      if (remainingUnits < minUnits) return;
-      const counts = [...current, remainingUnits];
-      const offGrid = counts.filter((count) => count % stepUnits !== 0).length;
-      if (offGrid <= allowedOffGridComponents) addCounts(counts);
-      return;
-    }
+    const rec = (
+      remainingParts: number,
+      remainingUnits: number,
+      current: number[],
+    ) => {
+      if (remainingParts === 1) {
+        if (remainingUnits < minUnits) return;
+        const counts = [...current, remainingUnits];
+        const offGrid = counts.filter((count) => count % stepUnits !== 0).length;
+        if (offGrid <= allowedOffGridComponents) addCounts(counts);
+        return;
+      }
 
-    const max = remainingUnits - minUnits * (remainingParts - 1);
-    for (let count = minUnits; count <= max; count++) {
-      rec(remainingParts - 1, remainingUnits - count, [...current, count]);
-    }
-  };
+      const max = remainingUnits - minUnits * (remainingParts - 1);
+      for (let count = minUnits; count <= max; count++) {
+        rec(remainingParts - 1, remainingUnits - count, [...current, count]);
+      }
+    };
 
-  rec(parts, totalUnits, []);
+    rec(parts, totalUnits, []);
+  }
 
   // Equal thirds are the only non-grid special case kept for all grid modes.
   // It stays as the exact 1:1:1 recipe so the printable sequence is not rounded
@@ -519,7 +625,6 @@ function candidateScore(
   targetRgbChroma: number,
   candidate: BlendCandidate,
   baseDistance: number,
-  accentProtection: AccentProtectionMode,
   mixPriority: VirtualMixPriorityMode,
   mappingStrategy: MappingStrategyMode,
   targetWeightShare: number,
@@ -539,16 +644,8 @@ function candidateScore(
     ? hueDistanceDegrees(targetHue, candidateHue)
     : 0;
 
-  // Keep the Prusa-calibrated FDM model as the primary score.  These are only
+  // Keep the Prusa-calibrated FDM model as the primary score. These are only
   // tie-breakers/guards, not alternate colour models.
-  if (accentProtection !== "off" && targetChroma >= 12) {
-    const strong = accentProtection === "strong" || mixPriority === "avoid-muddy";
-    const allowedHueGap = strong ? 28 : 40;
-    if (hueGap > allowedHueGap) score += (hueGap - allowedHueGap) * (strong ? 0.22 : 0.12);
-    if (candidateChroma < targetChroma * (strong ? 0.42 : 0.32))
-      score += (targetChroma * (strong ? 0.42 : 0.32) - candidateChroma) * (strong ? 0.16 : 0.08);
-  }
-
   if (mixPriority === "preserve-hue" && targetChroma >= 16) {
     if (hueGap > 24) score += (hueGap - 24) * 0.18;
   } else if (mixPriority === "avoid-muddy" && targetChroma >= 16) {
@@ -563,12 +660,22 @@ function candidateScore(
     if (candidateChroma < targetChroma * 0.36)
       score += (targetChroma * 0.36 - candidateChroma) * 0.18;
   } else if (mappingStrategy === "preserve-accent" && targetChroma >= 12) {
-    const smallRegion = targetWeightShare > 0 && targetWeightShare <= 0.025;
+    // Mapping-only accent protection. Target-palette accent preservation is a
+    // separate palette-reduction setting and must not alter this score. Avoid
+    // treating every small, lightly chromatic cream/beige patch as a saturated
+    // accent: the small-region boost starts at a higher target chroma.
+    const smallRegion =
+      targetWeightShare > 0 &&
+      targetWeightShare <= 0.025 &&
+      targetChroma >= 18;
     const hueLimit = smallRegion ? 10 : 18;
-    if (hueGap > hueLimit) score += (hueGap - hueLimit) * (smallRegion ? 0.42 : 0.24);
+    if (hueGap > hueLimit)
+      score += (hueGap - hueLimit) * (smallRegion ? 0.42 : 0.24);
     const minimumChroma = targetChroma * (smallRegion ? 0.55 : 0.42);
     if (candidateChroma < minimumChroma)
-      score += (minimumChroma - candidateChroma) * (smallRegion ? 0.24 : 0.14);
+      score +=
+        (minimumChroma - candidateChroma) *
+        (smallRegion ? 0.24 : 0.14);
   } else if (mappingStrategy === "smooth" && targetChroma >= 4) {
     // Smooth mode avoids visibly harsh printable jumps by mildly preferring
     // less over-saturated candidates when several matches are otherwise close.
@@ -599,12 +706,12 @@ function adjustPreviewLightness(rgb: RGB, offset: number): RGB {
 function bestBlendForColour(
   targetRgb: RGB,
   candidates: BlendCandidate[],
-  accentProtection: AccentProtectionMode,
   mixPriority: VirtualMixPriorityMode,
   mappingStrategy: MappingStrategyMode,
   colourDifferenceMetric: ColourDifferenceMetric,
   targetWeightShare: number,
   previewLightnessOffset: number,
+  recipeResolution: MixingRecipeResolution,
   previousSmoothLab: LAB | null = null,
 ): {
   subset: PhysicalSlot[];
@@ -628,10 +735,9 @@ function bestBlendForColour(
   let rawBestScore = Number.POSITIVE_INFINITY;
   let rawBestIndex = -1;
   let rawBestError = Number.POSITIVE_INFINITY;
-  const smoothScores =
-    mappingStrategy === "smooth" ? new Float64Array(candidates.length) : null;
-  const smoothErrors =
-    mappingStrategy === "smooth" ? new Float64Array(candidates.length) : null;
+  let minimumBaseError = Number.POSITIVE_INFINITY;
+  const candidateScores = new Float64Array(candidates.length);
+  const candidateErrors = new Float64Array(candidates.length);
 
   for (let index = 0; index < candidates.length; index++) {
     const candidate = candidates[index];
@@ -647,17 +753,25 @@ function bestBlendForColour(
       targetRgbChroma,
       candidate,
       error,
-      accentProtection,
       mixPriority,
       mappingStrategy,
       targetWeightShare,
       previewLightnessOffset,
     );
-    if (smoothScores) {
-      smoothScores[index] = score;
-      smoothErrors![index] = error;
-    }
-    if (score < rawBestScore) {
+    candidateErrors[index] = error;
+    candidateScores[index] = score;
+    minimumBaseError = Math.min(minimumBaseError, error);
+
+    const scoreWins = score < rawBestScore - 1e-9;
+    const scoreTies = Math.abs(score - rawBestScore) <= 1e-9;
+    const errorWinsTie = scoreTies && error < rawBestError - 1e-9;
+    const complexityWinsTie =
+      scoreTies &&
+      Math.abs(error - rawBestError) <= 1e-9 &&
+      (rawBestIndex < 0 ||
+        candidate.complexityPenalty <
+          candidates[rawBestIndex].complexityPenalty - 1e-9);
+    if (scoreWins || errorWinsTie || complexityWinsTie) {
       rawBestScore = score;
       rawBestIndex = index;
       rawBestError = error;
@@ -667,32 +781,192 @@ function bestBlendForColour(
   let bestIndex = rawBestIndex;
   let bestScore = rawBestScore;
   let bestError = rawBestError;
-  if (
-    mappingStrategy === "smooth" &&
-    previousSmoothLab &&
-    smoothScores &&
-    smoothErrors
-  ) {
-    bestIndex = -1;
-    bestScore = Number.POSITIVE_INFINITY;
+
+  if (mappingStrategy === "smooth" && previousSmoothLab) {
+    const scoreAllowance = smoothTransitionScoreAllowance(
+      colourDifferenceMetric,
+    );
+    bestIndex = rawBestIndex;
+    bestScore = rawBestScore;
+    bestError = rawBestError;
+    let bestSmoothValue = rawBestScore;
+
     for (let index = 0; index < candidates.length; index++) {
-      const rawScore = smoothScores[index];
-      const candidate = candidates[index];
-      const score =
-        rawScore <= rawBestScore + 7
-          ? rawScore +
-            colourDistance(
-              previousSmoothLab,
-              candidate.fdmLab,
-              colourDifferenceMetric,
-            ) *
-              0.06
-          : rawScore;
-      if (score < bestScore) {
-        bestScore = score;
+      const rawScore = candidateScores[index];
+      if (rawScore > rawBestScore + scoreAllowance) continue;
+      const continuityPenalty =
+        colourDistance(
+          previousSmoothLab,
+          candidates[index].fdmLab,
+          colourDifferenceMetric,
+        ) * 0.06;
+      const smoothValue = rawScore + continuityPenalty;
+      if (
+        smoothValue < bestSmoothValue - 1e-9 ||
+        (Math.abs(smoothValue - bestSmoothValue) <= 1e-9 &&
+          candidateErrors[index] < bestError - 1e-9)
+      ) {
+        bestSmoothValue = smoothValue;
         bestIndex = index;
-        bestError = smoothErrors[index];
+        bestScore = rawScore;
+        bestError = candidateErrors[index];
       }
+    }
+  }
+
+  // Common coarse-grid lightness guard. It deliberately evaluates eligibility
+  // against the underlying colour difference rather than the strategy score:
+  // strategy penalties must not lock in an obviously too-dark result. This is
+  // intentionally limited to severe coarse-grid lightness loss; normal cases
+  // remain controlled by the selected mapping strategy.
+  if (
+    bestIndex >= 0 &&
+    usesCoarsePerceptualGuards(recipeResolution) &&
+    targetLab.L >= COARSE_LIGHTNESS_GUARD_MIN_TARGET_L
+  ) {
+    const currentBest = candidates[bestIndex];
+    const currentDarkening = targetLab.L - currentBest.fdmLab.L;
+    if (currentDarkening >= COARSE_LIGHTNESS_GUARD_MIN_DARKENING) {
+      const currentLightnessGap = Math.abs(currentBest.fdmLab.L - targetLab.L);
+      let guardedIndex = bestIndex;
+      let guardedScore = bestScore;
+      let guardedError = bestError;
+      let guardedValue =
+        bestError +
+        currentLightnessGap * COARSE_LIGHTNESS_GUARD_L_WEIGHT;
+      const baseAllowance = coarseLightnessGuardBaseAllowance(
+        colourDifferenceMetric,
+      );
+
+      for (let index = 0; index < candidates.length; index++) {
+        if (index === bestIndex) continue;
+        const candidate = candidates[index];
+        const error = candidateErrors[index];
+        if (error > minimumBaseError + baseAllowance) continue;
+
+        const lightnessGap = Math.abs(candidate.fdmLab.L - targetLab.L);
+        if (
+          lightnessGap >
+          currentLightnessGap - COARSE_LIGHTNESS_GUARD_MIN_IMPROVEMENT
+        )
+          continue;
+
+        const score = candidateScores[index];
+        const guardValue =
+          error + lightnessGap * COARSE_LIGHTNESS_GUARD_L_WEIGHT;
+        if (guardValue + 1e-9 < guardedValue) {
+          guardedIndex = index;
+          guardedScore = score;
+          guardedError = error;
+          guardedValue = guardValue;
+        }
+      }
+
+      if (guardedIndex !== bestIndex) {
+        bestIndex = guardedIndex;
+        bestScore = guardedScore;
+        bestError = guardedError;
+      }
+    }
+  }
+
+  // Common warm->green/olive guard. It is intentionally narrow: it only runs
+  // when the selected candidate is visibly green/olive for an actually warm
+  // brown/orange/rust target. Real green targets are therefore left untouched.
+  if (
+    bestIndex >= 0 &&
+    usesCoarsePerceptualGuards(recipeResolution) &&
+    isWarmBrownOrangeRustTarget(targetLab) &&
+    isGreenOliveCandidate(candidates[bestIndex].fdmLab)
+  ) {
+    const current = candidates[bestIndex];
+    const currentHueGap = hueDistanceDegrees(
+      targetHue,
+      current.fdmHue,
+    );
+    const currentLightnessGap = Math.abs(current.fdmLab.L - targetLab.L);
+    let guardedIndex = bestIndex;
+    let guardedScore = bestScore;
+    let guardedError = bestError;
+    let guardedValue =
+      bestError + currentLightnessGap * 0.30 + currentHueGap * 0.06 + 5.0;
+    const baseAllowance = commonWarmGreenGuardBaseAllowance(
+      colourDifferenceMetric,
+    );
+
+    for (let index = 0; index < candidates.length; index++) {
+      if (index === bestIndex) continue;
+      const candidate = candidates[index];
+      if (isGreenOliveCandidate(candidate.fdmLab)) continue;
+      const error = candidateErrors[index];
+      if (error > minimumBaseError + baseAllowance) continue;
+      const lightnessGap = Math.abs(candidate.fdmLab.L - targetLab.L);
+      if (lightnessGap > currentLightnessGap + 3) continue;
+      const hueGap =
+        candidate.fdmChroma >= 4
+          ? hueDistanceDegrees(targetHue, candidate.fdmHue)
+          : 0;
+      const strategyPenalty = Math.max(0, candidateScores[index] - error);
+      const guardValue =
+        error +
+        lightnessGap * 0.30 +
+        hueGap * 0.06 +
+        strategyPenalty * 0.15;
+      if (guardValue + COMMON_WARM_GREEN_MIN_IMPROVEMENT < guardedValue) {
+        guardedIndex = index;
+        guardedScore = candidateScores[index];
+        guardedError = error;
+        guardedValue = guardValue;
+      }
+    }
+
+    if (guardedIndex !== bestIndex) {
+      bestIndex = guardedIndex;
+      bestScore = guardedScore;
+      bestError = guardedError;
+    }
+  }
+
+  // Closest-match keeps the broader warm/lightness reranker introduced for the
+  // 10/20/25% grids. Other strategies have their own semantic scoring and only use
+  // the two common plausibility guards above.
+  if (
+    bestIndex >= 0 &&
+    mappingStrategy === "closest" &&
+    usesCoarsePerceptualGuards(recipeResolution) &&
+    isWarmClosestGuardTarget(targetLab)
+  ) {
+    const baseAllowance = closestWarmGuardBaseAllowance(
+      colourDifferenceMetric,
+    );
+    let guardedIndex = bestIndex;
+    let guardedScore = bestScore;
+    let guardedError = bestError;
+    let guardedValue = warmClosestGuardValue(
+      targetLab,
+      candidates[bestIndex],
+      bestError,
+    );
+
+    for (let index = 0; index < candidates.length; index++) {
+      if (index === bestIndex) continue;
+      const candidate = candidates[index];
+      const error = candidateErrors[index];
+      if (error > minimumBaseError + baseAllowance) continue;
+
+      const guardValue = warmClosestGuardValue(targetLab, candidate, error);
+      if (guardValue + 0.25 < guardedValue) {
+        guardedIndex = index;
+        guardedError = error;
+        guardedValue = guardValue;
+        guardedScore = candidateScores[index];
+      }
+    }
+
+    if (guardedIndex !== bestIndex) {
+      bestIndex = guardedIndex;
+      bestScore = guardedScore;
+      bestError = guardedError;
     }
   }
 
@@ -709,7 +983,10 @@ function bestBlendForColour(
     fdmLab: best.fdmLab,
     layerAverageRgb: best.layerAverageRgb,
     error: bestError,
-    diagnosticError: bestScore,
+    // Diagnostics report the actual colour-difference metric, not strategy
+    // penalties. This keeps Average/Worst/Poor matches comparable between the
+    // five mapping strategies.
+    diagnosticError: bestError,
   };
 }
 
@@ -745,90 +1022,6 @@ function colourHueDistance(a: number, b: number): number {
   return Math.min(d, 360 - d);
 }
 
-
-function effectiveMergeProtection(
-  accentProtection: AccentProtectionMode,
-  mixPriority: VirtualMixPriorityMode,
-): AccentProtectionMode {
-  // The priority dropdown must not replace the optical target-colour preview
-  // with a raw RGB layer average.  It only controls how conservative display
-  // merging is: hue-oriented modes keep more target colours separated when they
-  // would otherwise share the same layer sequence.
-  if (accentProtection === "strong") return "strong";
-  if (mixPriority === "preserve-hue" || mixPriority === "avoid-muddy")
-    return "strong";
-  return accentProtection;
-}
-
-function compatibleForDisplayMerge(
-  a: RGB,
-  b: RGB,
-  accentProtection: AccentProtectionMode = "balanced",
-): boolean {
-  const distance = Math.sqrt(squaredDistance(a, b));
-  if (accentProtection === "off") return distance <= 34;
-  const strong = accentProtection === "strong";
-  const ah = colourHue(a);
-  const bh = colourHue(b);
-  const ac = colourChroma(a);
-  const bc = colourChroma(b);
-  const maxChroma = Math.max(ac, bc);
-  const minChroma = Math.min(ac, bc);
-  const chromaGap = Math.abs(ac - bc);
-
-  // Always allow very close colours to collapse. These are normally sampling
-  // noise or neighbouring tones from the same painted area.
-  if (distance <= (strong ? 12 : 18)) return true;
-
-  // Neutral and near-neutral colours can merge by RGB distance because hue is
-  // unstable there. A chromatic colour, however, must not be averaged into a
-  // neutral-looking mixture just because both use the same physical layer
-  // sequence. That is the failure mode that hides small accents in the print
-  // simulation.
-  if (ah === null || bh === null || maxChroma < 0.075) {
-    if (maxChroma >= (strong ? 0.07 : 0.1) && distance > (strong ? 10 : 16))
-      return false;
-    if (
-      maxChroma >= (strong ? 0.055 : 0.075) &&
-      minChroma < maxChroma * (strong ? 0.66 : 0.5) &&
-      distance > (strong ? 9 : 14)
-    )
-      return false;
-    return distance <= (strong ? 18 : 28);
-  }
-
-  const hueGap = colourHueDistance(ah, bh);
-
-  // Generic accent protection: any chromatic hue family may be semantically
-  // relevant, not just red. If two target colours differ clearly in hue or
-  // saturation, keep separate virtual extruders even when their quantised layer
-  // sequence is identical. Larger same-family regions are then still free to
-  // merge with each other, but a small green/blue/cyan/red/yellow accent is not
-  // swallowed by a larger differently coloured area.
-  if (maxChroma >= (strong ? 0.075 : 0.12)) {
-    if (hueGap > (strong ? 16 : 26) && distance > (strong ? 12 : 20))
-      return false;
-    if (hueGap > (strong ? 10 : 16) && distance > (strong ? 18 : 26))
-      return false;
-    if (chromaGap > (strong ? 0.11 : 0.2) && distance > (strong ? 15 : 24))
-      return false;
-    if (
-      minChroma < maxChroma * (strong ? 0.64 : 0.48) &&
-      distance > (strong ? 14 : 24)
-    )
-      return false;
-  }
-
-  // Same hue family: allow moderate tonal variation so broad, similar surfaces
-  // still collapse instead of consuming virtual extruders.
-  if (hueGap <= (strong ? 5 : 8))
-    return (
-      distance <= (strong ? 30 : 46) && chromaGap <= (strong ? 0.14 : 0.24)
-    );
-  if (hueGap <= (strong ? 9 : 14))
-    return distance <= (strong ? 22 : 34) && chromaGap <= (strong ? 0.1 : 0.18);
-  return distance <= (strong ? 16 : 26) && chromaGap <= (strong ? 0.08 : 0.12);
-}
 
 function comparePaletteForSmoothMapping(a: PaletteEntry, b: PaletteEntry): number {
   const al = rgbToLab(a.rgb);
@@ -872,7 +1065,6 @@ export function buildVirtualExtruderPlan(
     purePhysicalThreshold: options.purePhysicalThreshold ?? 0.985,
     ratioStepPercent: options.ratioStepPercent,
     recipeResolution: options.recipeResolution ?? recipeResolutionFromLegacyStep(options.ratioStepPercent),
-    accentProtection: options.accentProtection ?? "balanced",
     mixPriority: options.mixPriority ?? "accurate",
     mappingStrategy: options.mappingStrategy ?? "closest",
     colourDifferenceMetric: options.colourDifferenceMetric ?? "ciede2000",
@@ -917,22 +1109,65 @@ export function buildVirtualExtruderPlan(
       : palette;
   let previousSmoothLab: LAB | null = null;
   const mappingErrors: Array<{ error: number; weight: number }> = [];
+  const targetMappings: TargetMappingDiagnostic[] = [];
 
   for (const p of orderedPalette) {
     const best = bestBlendForColour(
       p.rgb,
       blendCandidates,
-      opts.accentProtection,
       opts.mixPriority,
       opts.mappingStrategy,
       opts.colourDifferenceMetric,
       Math.max(0, p.count) / totalPaletteWeight,
       opts.previewLightnessOffset,
+      opts.recipeResolution ??
+        recipeResolutionFromLegacyStep(opts.ratioStepPercent),
       previousSmoothLab,
     );
     if (!best) continue;
     mappingErrors.push({ error: best.diagnosticError, weight: Math.max(1, p.count) });
     if (opts.mappingStrategy === "smooth") previousSmoothLab = best.fdmLab;
+
+    const targetLab = rgbToLab(p.rgb);
+    const targetChroma = labChroma(targetLab);
+    const predictedChroma = labChroma(best.fdmLab);
+    const targetHue = labHueDegrees(targetLab);
+    const predictedHue = labHueDegrees(best.fdmLab);
+    const hueShiftDegrees =
+      targetChroma >= 4 && predictedChroma >= 4
+        ? ((predictedHue - targetHue + 540) % 360) - 180
+        : null;
+    const recipeCounts = new Map<number, number>();
+    for (const extruder of best.sequence)
+      recipeCounts.set(extruder, (recipeCounts.get(extruder) ?? 0) + 1);
+    const recipeLength = Math.max(1, best.sequence.length);
+    const diagnosticRecipe: TargetMappingRecipeComponent[] = [
+      ...recipeCounts.entries(),
+    ]
+      .sort((a, b) => a[0] - b[0])
+      .map(([extruder, count]) => ({
+        extruder,
+        count,
+        ratio: count / recipeLength,
+      }));
+    const recordTargetMapping = (
+      assignment:
+        | { kind: "physical"; extruder: number }
+        | { kind: "virtual"; virtualId: number },
+    ) => {
+      targetMappings.push({
+        paletteIndex: p.index,
+        targetRgb: p.rgb,
+        targetLab,
+        assignment,
+        recipe: diagnosticRecipe,
+        predictedRgb: best.fdmRgb,
+        predictedLab: best.fdmLab,
+        deltaE: best.diagnosticError,
+        hueShiftDegrees,
+        lightnessShift: best.fdmLab.L - targetLab.L,
+      });
+    };
 
     const active = best.active;
 
@@ -953,10 +1188,12 @@ export function buildVirtualExtruderPlan(
         triangleCount: p.count,
         linearRgbError: rgbError(p.rgb, physicalRgb),
       });
-      paletteToAssignment.set(p.index, {
-        kind: "physical",
+      const assignment = {
+        kind: "physical" as const,
         extruder: dominant.slot.slot,
-      });
+      };
+      paletteToAssignment.set(p.index, assignment);
+      recordTargetMapping(assignment);
       continue;
     }
 
@@ -975,7 +1212,9 @@ export function buildVirtualExtruderPlan(
         triangleCount: p.count,
         linearRgbError: rgbError(p.rgb, physicalRgb),
       });
-      paletteToAssignment.set(p.index, { kind: "physical", extruder: ext });
+      const assignment = { kind: "physical" as const, extruder: ext };
+      paletteToAssignment.set(p.index, assignment);
+      recordTargetMapping(assignment);
       continue;
     }
 
@@ -997,10 +1236,12 @@ export function buildVirtualExtruderPlan(
       // palette colours onto the same VE instead of keeping duplicate virtual
       // extruders for visually different target colours.
       existing.displayRgb = effectiveRgb;
-      paletteToAssignment.set(p.index, {
-        kind: "virtual",
+      const assignment = {
+        kind: "virtual" as const,
         virtualId: existing.virtualId,
-      });
+      };
+      paletteToAssignment.set(p.index, assignment);
+      recordTargetMapping(assignment);
       continue;
     }
 
@@ -1037,7 +1278,9 @@ export function buildVirtualExtruderPlan(
       weightedTargets: [{ rgb: p.rgb, weight: p.count }],
     };
     bySequence.set(key, entry);
-    paletteToAssignment.set(p.index, { kind: "virtual", virtualId });
+    const assignment = { kind: "virtual" as const, virtualId };
+    paletteToAssignment.set(p.index, assignment);
+    recordTargetMapping(assignment);
   }
 
   const virtualBlends = [...bySequence.values()].map(
@@ -1069,7 +1312,14 @@ export function buildVirtualExtruderPlan(
         collapsedTargetColours: Math.max(0, assignedTargetCount - printableAssignmentCount),
       }
     : emptyMappingDiagnostics(opts.colourDifferenceMetric);
-  return { virtualBlends, physicalOnly, paletteToAssignment, mappingDiagnostics };
+  targetMappings.sort((a, b) => a.paletteIndex - b.paletteIndex);
+  return {
+    virtualBlends,
+    physicalOnly,
+    paletteToAssignment,
+    mappingDiagnostics,
+    targetMappings,
+  };
 }
 
 export function virtualExtruderPlanToCsv(plan: VirtualExtruderPlan): string {

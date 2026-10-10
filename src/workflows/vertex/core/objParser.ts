@@ -1,4 +1,4 @@
-import type { MeshModel, RGB, Tri, Vec3 } from './types';
+import type { MeshModel, MeshPart, RGB, Tri, Vec3 } from './types';
 import { clamp255 } from './colour';
 
 export interface ObjParseProgress {
@@ -29,14 +29,21 @@ function colourKey(rgb: RGB): number {
   return (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
 }
 
+function cleanSectionName(value: string, fallback: string): string {
+  const cleaned = value.trim();
+  return cleaned || fallback;
+}
+
 class ObjParseState {
   vertices: Vec3[] = [];
   vertexColours: Array<RGB | null> = [];
   triangles: Tri[] = [];
   triangleColors: RGB[] = [];
-  objectFaceCounts: Record<string, number> = {};
+  triangleObjectNames: string[] = [];
+  triangleGroupNames: string[] = [];
   colourKeys = new Set<number>();
   currentObject = 'default';
+  currentGroup = 'default';
   coloredVertexCount = 0;
   pendingFaceColor: RGB | null = null;
 
@@ -55,8 +62,13 @@ class ObjParseState {
 
     const head = line.slice(0, 2);
 
-    if ((head === 'o ' || head === 'g ') && line.length > 2) {
-      this.currentObject = line.slice(2).trim() || 'unnamed';
+    if (head === 'o ' && line.length > 2) {
+      this.currentObject = cleanSectionName(line.slice(2), 'unnamed object');
+      return;
+    }
+
+    if (head === 'g ' && line.length > 2) {
+      this.currentGroup = cleanSectionName(line.slice(2), 'unnamed group');
       return;
     }
 
@@ -98,21 +110,75 @@ class ObjParseState {
           : [180, 180, 180]);
         this.triangles.push(tri);
         this.triangleColors.push(rgb);
+        this.triangleObjectNames.push(this.currentObject);
+        this.triangleGroupNames.push(this.currentGroup);
         this.colourKeys.add(colourKey(rgb));
-        this.objectFaceCounts[this.currentObject] = (this.objectFaceCounts[this.currentObject] || 0) + 1;
       }
     }
+  }
+
+  private buildParts(): { parts: MeshPart[]; trianglePartIndices: Uint32Array; objectFaceCounts: Record<string, number> } {
+    const explicitObjects = new Set(
+      this.triangleObjectNames.filter(name => name !== 'default'),
+    );
+    const explicitGroups = new Set(
+      this.triangleGroupNames.filter(name => name !== 'default'),
+    );
+
+    const source: MeshPart['source'] = explicitObjects.size >= 2
+      ? 'object'
+      : explicitGroups.size >= 2
+        ? 'group'
+        : 'single';
+
+    const names = source === 'object'
+      ? this.triangleObjectNames
+      : source === 'group'
+        ? this.triangleGroupNames
+        : this.triangleObjectNames.map((objectName, index) => {
+            if (objectName !== 'default') return objectName;
+            const groupName = this.triangleGroupNames[index];
+            return groupName !== 'default' ? groupName : 'Model';
+          });
+
+    const partIndexByName = new Map<string, number>();
+    const parts: MeshPart[] = [];
+    const trianglePartIndices = new Uint32Array(this.triangles.length);
+    const objectFaceCounts: Record<string, number> = {};
+
+    names.forEach((rawName, triangleIndex) => {
+      const name = rawName === 'default' ? 'Ungrouped' : rawName;
+      let partIndex = partIndexByName.get(name);
+      if (partIndex === undefined) {
+        partIndex = parts.length;
+        partIndexByName.set(name, partIndex);
+        parts.push({
+          id: `part-${partIndex + 1}`,
+          name,
+          triangleCount: 0,
+          source,
+        });
+      }
+      trianglePartIndices[triangleIndex] = partIndex;
+      parts[partIndex].triangleCount += 1;
+      objectFaceCounts[name] = (objectFaceCounts[name] || 0) + 1;
+    });
+
+    return { parts, trianglePartIndices, objectFaceCounts };
   }
 
   toModel(name: string): MeshModel {
     if (this.vertices.length === 0 || this.triangles.length === 0) {
       throw new Error('No usable vertices/triangles were found. The OBJ must contain triangulatable faces.');
     }
+    const { parts, trianglePartIndices, objectFaceCounts } = this.buildParts();
     return {
       name,
       vertices: this.vertices,
       triangles: this.triangles,
       triangleColors: this.triangleColors,
+      parts,
+      trianglePartIndices,
       // Do not retain the per-source-vertex colour table after parsing.
       // It is only needed while deriving face colours, and keeping it on the
       // model causes a significant additional heap peak in Chromium browsers.
@@ -121,10 +187,92 @@ class ObjParseState {
         triangleCount: this.triangles.length,
         coloredVertexCount: this.coloredVertexCount,
         uniqueFaceColors: this.colourKeys.size,
-        objectFaceCounts: this.objectFaceCounts,
+        objectFaceCounts,
       },
     };
   }
+}
+
+export function filterMeshModelByPartIds(
+  model: MeshModel,
+  enabledPartIds: ReadonlySet<string>,
+): MeshModel {
+  if (enabledPartIds.size >= model.parts.length && model.parts.every(part => enabledPartIds.has(part.id))) {
+    return model;
+  }
+
+  const selectedOldPartIndices = new Set<number>();
+  model.parts.forEach((part, index) => {
+    if (enabledPartIds.has(part.id)) selectedOldPartIndices.add(index);
+  });
+  if (selectedOldPartIndices.size === 0) {
+    throw new Error('At least one model part must remain selected.');
+  }
+
+  const selectedParts: MeshPart[] = [];
+  const newPartIndexByOldIndex = new Map<number, number>();
+  model.parts.forEach((part, oldIndex) => {
+    if (!selectedOldPartIndices.has(oldIndex)) return;
+    const newIndex = selectedParts.length;
+    newPartIndexByOldIndex.set(oldIndex, newIndex);
+    selectedParts.push({ ...part });
+  });
+
+  const vertexMap = new Map<number, number>();
+  const vertices: Vec3[] = [];
+  const triangles: Tri[] = [];
+  const triangleColors: RGB[] = [];
+  const trianglePartIndices: number[] = [];
+  const colourKeys = new Set<number>();
+  const objectFaceCounts: Record<string, number> = {};
+
+  const remapVertex = (sourceIndex: number): number => {
+    const existing = vertexMap.get(sourceIndex);
+    if (existing !== undefined) return existing;
+    const next = vertices.length;
+    vertexMap.set(sourceIndex, next);
+    vertices.push(model.vertices[sourceIndex]);
+    return next;
+  };
+
+  for (let triangleIndex = 0; triangleIndex < model.triangles.length; triangleIndex += 1) {
+    const oldPartIndex = model.trianglePartIndices[triangleIndex] ?? 0;
+    const newPartIndex = newPartIndexByOldIndex.get(oldPartIndex);
+    if (newPartIndex === undefined) continue;
+
+    const sourceTri = model.triangles[triangleIndex];
+    const tri: Tri = [
+      remapVertex(sourceTri[0]),
+      remapVertex(sourceTri[1]),
+      remapVertex(sourceTri[2]),
+    ];
+    const rgb = model.triangleColors[triangleIndex];
+    triangles.push(tri);
+    triangleColors.push(rgb);
+    trianglePartIndices.push(newPartIndex);
+    colourKeys.add(colourKey(rgb));
+    const partName = selectedParts[newPartIndex].name;
+    objectFaceCounts[partName] = (objectFaceCounts[partName] || 0) + 1;
+  }
+
+  const allVerticesColoured = model.stats.coloredVertexCount >= model.stats.vertexCount;
+  return {
+    ...model,
+    vertices,
+    triangles,
+    triangleColors,
+    parts: selectedParts,
+    trianglePartIndices: Uint32Array.from(trianglePartIndices),
+    stats: {
+      vertexCount: vertices.length,
+      triangleCount: triangles.length,
+      coloredVertexCount: allVerticesColoured
+        ? vertices.length
+        : Math.min(model.stats.coloredVertexCount, vertices.length),
+      uniqueFaceColors: colourKeys.size,
+      objectFaceCounts,
+    },
+  };
 }
 
 export function parseObj(text: string, name = 'model.obj'): MeshModel {

@@ -618,6 +618,94 @@ function trianglePaletteIndices(
   );
 }
 
+interface ExportModelPart {
+  objectId: number;
+  sourcePartIndex: number;
+  name: string;
+  vertices: Vec3[];
+  triangles: Array<{ triangle: Tri; sourceTriangleIndex: number }>;
+}
+
+function buildExportModelParts(model: MeshModel): ExportModelPart[] {
+  if (
+    model.parts.length <= 1 ||
+    model.trianglePartIndices.length !== model.triangles.length
+  ) {
+    return [
+      {
+        objectId: 1,
+        sourcePartIndex: 0,
+        name: model.parts[0]?.name?.trim() || modelBaseName(model.name),
+        vertices: model.vertices,
+        triangles: model.triangles.map((triangle, sourceTriangleIndex) => ({
+          triangle,
+          sourceTriangleIndex,
+        })),
+      },
+    ];
+  }
+
+  const triangleIndicesByPart = model.parts.map(() => [] as number[]);
+  for (let triangleIndex = 0; triangleIndex < model.triangles.length; triangleIndex++) {
+    const partIndex = model.trianglePartIndices[triangleIndex] ?? 0;
+    if (partIndex < triangleIndicesByPart.length) {
+      triangleIndicesByPart[partIndex].push(triangleIndex);
+    }
+  }
+
+  const exportParts: ExportModelPart[] = [];
+  model.parts.forEach((part, partIndex) => {
+    const sourceTriangleIndices = triangleIndicesByPart[partIndex];
+    if (!sourceTriangleIndices || sourceTriangleIndices.length === 0) return;
+
+    const vertexMap = new Map<number, number>();
+    const vertices: Vec3[] = [];
+    const remapVertex = (sourceVertexIndex: number): number => {
+      const existing = vertexMap.get(sourceVertexIndex);
+      if (existing !== undefined) return existing;
+      const next = vertices.length;
+      vertexMap.set(sourceVertexIndex, next);
+      vertices.push(model.vertices[sourceVertexIndex]);
+      return next;
+    };
+
+    const triangles = sourceTriangleIndices.map((sourceTriangleIndex) => {
+      const source = model.triangles[sourceTriangleIndex];
+      return {
+        triangle: [
+          remapVertex(source[0]),
+          remapVertex(source[1]),
+          remapVertex(source[2]),
+        ] as Tri,
+        sourceTriangleIndex,
+      };
+    });
+
+    exportParts.push({
+      objectId: exportParts.length + 1,
+      sourcePartIndex: partIndex,
+      name: part.name.trim() || `Part ${partIndex + 1}`,
+      vertices,
+      triangles,
+    });
+  });
+
+  return exportParts.length > 0
+    ? exportParts
+    : [
+        {
+          objectId: 1,
+          sourcePartIndex: 0,
+          name: modelBaseName(model.name),
+          vertices: model.vertices,
+          triangles: model.triangles.map((triangle, sourceTriangleIndex) => ({
+            triangle,
+            sourceTriangleIndex,
+          })),
+        },
+      ];
+}
+
 function buildModelXml(
   options: Export3mfOptions,
   paletteToPaintCode: Map<number, string>,
@@ -630,6 +718,7 @@ function buildModelXml(
     options.palette,
     options.accentProtection ?? "balanced",
   );
+  const exportParts = buildExportModelParts(model);
   const leafByPaletteIndex = new Map<number, string>();
   for (const paletteIndex of options.palette.map((p) => p.index)) {
     const paintCode = paletteToPaintCode.get(paletteIndex);
@@ -654,31 +743,37 @@ function buildModelXml(
   );
   out.push(' <metadata name="Application">VertexColor2ColorMix</metadata>');
   out.push(" <resources>");
-  out.push('  <object id="1" type="model">');
-  out.push("   <mesh>");
-  out.push("    <vertices>");
-  for (const [x, y, z] of model.vertices) {
-    out.push(`     <vertex x="${fmt(x)}" y="${fmt(y)}" z="${fmt(z)}"/>`);
+  for (const part of exportParts) {
+    out.push(`  <object id="${part.objectId}" type="model">`);
+    out.push("   <mesh>");
+    out.push("    <vertices>");
+    for (const [x, y, z] of part.vertices) {
+      out.push(`     <vertex x="${fmt(x)}" y="${fmt(y)}" z="${fmt(z)}"/>`);
+    }
+    out.push("    </vertices>");
+    out.push("    <triangles>");
+    for (const entry of part.triangles) {
+      const [v1, v2, v3] = entry.triangle;
+      const paletteIndex = paletteIndices[entry.sourceTriangleIndex] ?? 1;
+      const leaf =
+        leafByPaletteIndex.get(paletteIndex) ??
+        leafByPaletteIndex.values().next().value ??
+        "3C";
+      out.push(
+        `     <triangle v1="${v1}" v2="${v2}" v3="${v3}" slic3rpe:mmu_segmentation="${leaf}"/>`,
+      );
+    }
+    out.push("    </triangles>");
+    out.push("   </mesh>");
+    out.push("  </object>");
   }
-  out.push("    </vertices>");
-  out.push("    <triangles>");
-  for (let i = 0; i < model.triangles.length; i++) {
-    const [v1, v2, v3] = model.triangles[i] as Tri;
-    const paletteIndex = paletteIndices[i] ?? 1;
-    const leaf =
-      leafByPaletteIndex.get(paletteIndex) ??
-      leafByPaletteIndex.values().next().value ??
-      "3C";
-    out.push(
-      `     <triangle v1="${v1}" v2="${v2}" v3="${v3}" slic3rpe:mmu_segmentation="${leaf}"/>`,
-    );
-  }
-  out.push("    </triangles>");
-  out.push("   </mesh>");
-  out.push("  </object>");
   out.push(" </resources>");
   out.push(" <build>");
-  out.push(`  <item objectid="1" transform="${transform}" printable="1"/>`);
+  for (const part of exportParts) {
+    out.push(
+      `  <item objectid="${part.objectId}" transform="${transform}" printable="1"/>`,
+    );
+  }
   out.push(" </build>");
   out.push("</model>");
   return out.join("\n") + "\n";
@@ -691,8 +786,46 @@ function buildModelConfig(
 ): string {
   const title = titleFromFilename(outputFileName);
   const sourceFile = model.name || `${modelBaseName(outputFileName)}.obj`;
-  const lastId = Math.max(0, model.triangles.length - 1);
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<config>\n <object id="1" instances_count="1">\n  <metadata type="object" key="name" value="${xmlEscape(title)}"/>\n  <metadata type="object" key="extruder" value="${Math.max(1, Math.round(defaultExtruder))}"/>\n  <volume firstid="0" lastid="${lastId}">\n   <metadata type="volume" key="name" value="${xmlEscape(title)}"/>\n   <metadata type="volume" key="volume_type" value="ModelPart"/>\n   <metadata type="volume" key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>\n   <metadata type="volume" key="source_file" value="${xmlEscape(sourceFile)}"/>\n   <metadata type="volume" key="source_object_id" value="0"/>\n   <metadata type="volume" key="source_volume_id" value="0"/>\n   <metadata type="volume" key="source_offset_x" value="0"/>\n   <metadata type="volume" key="source_offset_y" value="0"/>\n   <metadata type="volume" key="source_offset_z" value="0"/>\n   <mesh edges_fixed="0" degenerate_facets="0" facets_removed="0" facets_reversed="0" backwards_edges="0"/>\n  </volume>\n </object>\n</config>\n`;
+  const exportParts = buildExportModelParts(model);
+  const out: string[] = ['<?xml version="1.0" encoding="UTF-8"?>', "<config>"];
+
+  for (const part of exportParts) {
+    const objectName = exportParts.length === 1 ? title : part.name;
+    const lastId = Math.max(0, part.triangles.length - 1);
+    out.push(` <object id="${part.objectId}" instances_count="1">`);
+    out.push(
+      `  <metadata type="object" key="name" value="${xmlEscape(objectName)}"/>`,
+    );
+    out.push(
+      `  <metadata type="object" key="extruder" value="${Math.max(1, Math.round(defaultExtruder))}"/>`,
+    );
+    out.push(`  <volume firstid="0" lastid="${lastId}">`);
+    out.push(
+      `   <metadata type="volume" key="name" value="${xmlEscape(objectName)}"/>`,
+    );
+    out.push('   <metadata type="volume" key="volume_type" value="ModelPart"/>');
+    out.push(
+      '   <metadata type="volume" key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>',
+    );
+    out.push(
+      `   <metadata type="volume" key="source_file" value="${xmlEscape(sourceFile)}"/>`,
+    );
+    out.push(
+      `   <metadata type="volume" key="source_object_id" value="${part.sourcePartIndex}"/>`,
+    );
+    out.push('   <metadata type="volume" key="source_volume_id" value="0"/>');
+    out.push('   <metadata type="volume" key="source_offset_x" value="0"/>');
+    out.push('   <metadata type="volume" key="source_offset_y" value="0"/>');
+    out.push('   <metadata type="volume" key="source_offset_z" value="0"/>');
+    out.push(
+      '   <mesh edges_fixed="0" degenerate_facets="0" facets_removed="0" facets_reversed="0" backwards_edges="0"/>',
+    );
+    out.push("  </volume>");
+    out.push(" </object>");
+  }
+
+  out.push("</config>");
+  return out.join("\n") + "\n";
 }
 
 function writeContentTypes(includePng: boolean): string {

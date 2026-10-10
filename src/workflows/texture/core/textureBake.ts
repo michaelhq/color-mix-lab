@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { makeVertexColourPreviewMaterial } from "../../common/previewRendering";
+import { getSceneModelPartMetadata } from "../../common/modelParts";
 
 export interface BakedColorEntry {
   hex: string;
@@ -24,6 +25,7 @@ export type ReliefSource =
   | "none"
   | "displacementMap"
   | "bumpMap"
+  | "normalMap"
   | "aoMap"
   | "roughnessMap"
   | "metalnessMap";
@@ -55,6 +57,8 @@ export interface TextureBakeOptions {
   reliefStrengthPercent?: number;
   reliefSmoothing?: ReliefSmoothing;
   reliefUsePbrProxy?: boolean;
+  reliefUseNormalMap?: boolean;
+  preserveModelParts?: boolean;
   bakeColorMode?: BakeColorMode;
   textureMaxSize?: number | null;
   colourCorrection?: Partial<TextureColourCorrection>;
@@ -307,6 +311,7 @@ interface MaterialSamplingContext {
   aoSampler: SamplerData | null;
   emissiveSampler: SamplerData | null;
   alphaSampler: SamplerData | null;
+  reliefScale: number;
 }
 
 interface DetailError {
@@ -325,6 +330,8 @@ interface ReliefPositionCacheEntry {
 interface WorkTriangle extends BakeTriangle {
   ctx: MaterialSamplingContext;
   vertexColor: SrgbColor | null;
+  partId: string;
+  partName: string;
 }
 
 interface EvaluatedWorkTriangle {
@@ -442,6 +449,8 @@ function resolveOptions(
     reliefStrengthPercent: options.reliefStrengthPercent ?? 0.7,
     reliefSmoothing: options.reliefSmoothing ?? "light",
     reliefUsePbrProxy: options.reliefUsePbrProxy ?? true,
+    reliefUseNormalMap: options.reliefUseNormalMap ?? false,
+    preserveModelParts: options.preserveModelParts ?? false,
     bakeColorMode: options.bakeColorMode ?? "baseColor",
     textureMaxSize: options.textureMaxSize ?? null,
     colourCorrection: normaliseColourCorrection(options.colourCorrection),
@@ -779,6 +788,64 @@ function sampleTextureChannel(
   return luminance(color);
 }
 
+function decodeNormalVectorFromColor(color: SrgbColor): THREE.Vector3 {
+  const normal = new THREE.Vector3(
+    (color.r / 255) * 2 - 1,
+    (color.g / 255) * 2 - 1,
+    (color.b / 255) * 2 - 1,
+  );
+  if (!Number.isFinite(normal.lengthSq()) || normal.lengthSq() < 1e-8)
+    return new THREE.Vector3(0, 0, 1);
+  return normal.normalize();
+}
+
+function normalSlopeFromColor(color: SrgbColor): { sx: number; sy: number } {
+  const n = decodeNormalVectorFromColor(color);
+  const nz = Math.max(0.18, Math.abs(n.z));
+  return {
+    sx: -n.x / nz,
+    sy: -n.y / nz,
+  };
+}
+
+function normalMapHeightFromContext(
+  ctx: MaterialSamplingContext,
+  uv: THREE.Vector2,
+  smoothing: ReliefSmoothing,
+): number | null {
+  const sampler = ctx.normalSampler;
+  if (!sampler) return null;
+  const radius = smoothing === "off" ? 1 : smoothing === "light" ? 2 : 3;
+  const du = 1 / Math.max(1, sampler.width);
+  const dv = 1 / Math.max(1, sampler.height);
+  const centerSlope = normalSlopeFromColor(sampleTexture(sampler, uv.x, uv.y));
+
+  let total = 0;
+  let weight = 0;
+  for (let oy = -radius; oy <= radius; oy += 1) {
+    for (let ox = -radius; ox <= radius; ox += 1) {
+      if (ox === 0 && oy === 0) continue;
+      const dist = Math.abs(ox) + Math.abs(oy);
+      if (dist <= 0) continue;
+      const sampleSlope = normalSlopeFromColor(
+        sampleTexture(sampler, uv.x + ox * du, uv.y + oy * dv),
+      );
+      const pathIntegral =
+        -0.5 *
+        ((centerSlope.sx + sampleSlope.sx) * ox +
+          (centerSlope.sy + sampleSlope.sy) * oy);
+      const normalized = pathIntegral / dist;
+      const localWeight = 1 / dist;
+      total += normalized * localWeight;
+      weight += localWeight;
+    }
+  }
+
+  const avg = weight > 0 ? total / weight : 0;
+  const scale = smoothing === "off" ? 0.18 : smoothing === "light" ? 0.28 : 0.36;
+  return clamp01(0.5 + avg * scale);
+}
+
 function pbrProxyHeightFromContext(
   ctx: MaterialSamplingContext,
   uv: THREE.Vector2,
@@ -836,11 +903,14 @@ function pbrProxyHeightFromContext(
 
 function reliefSourceForContext(
   ctx: MaterialSamplingContext,
+  useNormalMap: boolean,
   allowPbrProxy: boolean,
 ): { source: ReliefSource; sampler: SamplerData | null } {
   if (ctx.displacementSampler)
     return { source: "displacementMap", sampler: ctx.displacementSampler };
   if (ctx.bumpSampler) return { source: "bumpMap", sampler: ctx.bumpSampler };
+  if (useNormalMap && ctx.normalSampler)
+    return { source: "normalMap", sampler: ctx.normalSampler };
   if (!allowPbrProxy) return { source: "none", sampler: null };
   if (ctx.aoSampler) return { source: "aoMap", sampler: ctx.aoSampler };
   if (ctx.roughnessSampler)
@@ -856,6 +926,8 @@ function reliefSourcePriority(source: ReliefSource): number {
       return 5;
     case "bumpMap":
       return 4;
+    case "normalMap":
+      return 3.5;
     case "aoMap":
       return 3;
     case "roughnessMap":
@@ -874,6 +946,10 @@ function heightFromReliefSource(
   uv: THREE.Vector2,
   smoothing: ReliefSmoothing,
 ): number {
+  if (source === "normalMap") {
+    const reconstructed = normalMapHeightFromContext(ctx, uv, smoothing);
+    return reconstructed ?? 0.5;
+  }
   if (
     source === "aoMap" ||
     source === "roughnessMap" ||
@@ -1090,20 +1166,42 @@ function detailSampleUvs(triangle: BakeTriangle): THREE.Vector2[] {
   ];
 }
 
+function srgbByteToLinearUnit(value: number): number {
+  const c = clamp01(value / 255);
+  return c <= 0.04045
+    ? c / 12.92
+    : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+
+function linearUnitToSrgbByte(value: number): number {
+  const c = clamp01(value);
+  const srgb =
+    c <= 0.0031308
+      ? c * 12.92
+      : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+  return clamp01(srgb) * 255;
+}
+
+/**
+ * A texture footprint must be averaged in linear-light RGB, not directly in
+ * gamma-encoded sRGB. Direct sRGB averaging darkens high-contrast texture
+ * regions and can collapse light warm details towards muddy brown.
+ */
 function averageSrgbColors(colors: SrgbColor[]): SrgbColor {
   if (colors.length === 0) return { ...DEFAULT_COLOR };
-  const sum = colors.reduce(
-    (acc, color) => ({
-      r: acc.r + color.r,
-      g: acc.g + color.g,
-      b: acc.b + color.b,
-    }),
-    { r: 0, g: 0, b: 0 },
-  );
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  for (const color of colors) {
+    r += srgbByteToLinearUnit(color.r);
+    g += srgbByteToLinearUnit(color.g);
+    b += srgbByteToLinearUnit(color.b);
+  }
+  const scale = 1 / colors.length;
   return {
-    r: sum.r / colors.length,
-    g: sum.g / colors.length,
-    b: sum.b / colors.length,
+    r: linearUnitToSrgbByte(r * scale),
+    g: linearUnitToSrgbByte(g * scale),
+    b: linearUnitToSrgbByte(b * scale),
   };
 }
 
@@ -1111,12 +1209,15 @@ function representativeTextureColorForTriangle(
   ctx: MaterialSamplingContext,
   triangle: BakeTriangle,
   mode: BakeColorMode,
+  colourCorrection: TextureColourCorrection,
 ): SrgbColor {
   const hasAnyColorSampler = Boolean(ctx.baseSampler || ctx.emissiveSampler);
   if (!hasAnyColorSampler || !triangle.vertices.every((vertex) => vertex.hasUv))
-    return materialBaseColor(ctx.material);
+    return applyTextureColourCorrection(materialBaseColor(ctx.material), colourCorrection);
+  // Match the corrected source preview: correction is applied to each sampled
+  // colour before the corrected texture footprint is averaged in linear light.
   const samples = detailSampleUvs(triangle).map((uv) =>
-    textureColorAt(ctx, uv, mode),
+    applyTextureColourCorrection(textureColorAt(ctx, uv, mode), colourCorrection),
   );
   return averageSrgbColors(samples);
 }
@@ -1297,6 +1398,8 @@ function subdivideWorkTriangle(triangle: WorkTriangle): WorkTriangle[] {
     ...child,
     ctx: triangle.ctx,
     vertexColor: triangle.vertexColor,
+    partId: triangle.partId,
+    partName: triangle.partName,
   }));
 }
 
@@ -1320,8 +1423,7 @@ export function bakeSceneToFaceColors(
   const sceneSize = new THREE.Vector3();
   sceneBox.getSize(sceneSize);
   const sceneDiagonal = Math.max(sceneSize.length(), 1e-6);
-  const reliefStrengthAbsolute =
-    sceneDiagonal * (resolved.reliefStrengthPercent / 100);
+  let reliefStrengthAbsolute = 0;
   const textureCache = new Map<THREE.Texture, SamplerData>();
   const colorCounts = new Map<string, number>();
   const colorBlockBinSize = 24;
@@ -1370,6 +1472,8 @@ export function bakeSceneToFaceColors(
   let reliefMaxHeight = Number.NEGATIVE_INFINITY;
   let reliefMaxDisplacement = 0;
   let reliefSeamLockedVertices = 0;
+  let reliefScaleSum = 0;
+  let reliefScaleCount = 0;
   let bakedOpenEdges = 0;
   let bakedNonManifoldEdges = 0;
   let normalMapOnlyForRelief = false;
@@ -1448,10 +1552,12 @@ export function bakeSceneToFaceColors(
 
   const edgeKeysForTriangle = (triangle: WorkTriangle): [string, string, string] => {
     const [a, b, c] = triangle.vertices;
+    const prefix = resolved.preserveModelParts ? `${triangle.partId}:` : "";
+    const key = (vertex: BakeVertex) => `${prefix}${reliefPositionKey(vertex.position)}`;
     return [
-      sortedEdgeKey(reliefPositionKey(a.position), reliefPositionKey(b.position)),
-      sortedEdgeKey(reliefPositionKey(b.position), reliefPositionKey(c.position)),
-      sortedEdgeKey(reliefPositionKey(c.position), reliefPositionKey(a.position)),
+      sortedEdgeKey(key(a), key(b)),
+      sortedEdgeKey(key(b), key(c)),
+      sortedEdgeKey(key(c), key(a)),
     ];
   };
 
@@ -1472,6 +1578,8 @@ export function bakeSceneToFaceColors(
       depth,
       ctx: triangle.ctx,
       vertexColor: triangle.vertexColor,
+      partId: triangle.partId,
+      partName: triangle.partName,
     });
 
     if (mask === 1 && ab) return [make([a, ab, c]), make([ab, b, c])];
@@ -1795,7 +1903,11 @@ export function bakeSceneToFaceColors(
       return { ...vertex, position: cached.position.clone() };
     }
 
-    const relief = reliefSourceForContext(ctx, resolved.reliefUsePbrProxy);
+    const relief = reliefSourceForContext(
+      ctx,
+      resolved.reliefUseNormalMap,
+      resolved.reliefUsePbrProxy,
+    );
     if (!relief.sampler) {
       reliefPositionCache.set(key, {
         position: vertex.position.clone(),
@@ -1818,7 +1930,10 @@ export function bakeSceneToFaceColors(
       vertex.uv,
       resolved.reliefSmoothing,
     );
-    const displacement = (height - 0.5) * reliefStrengthAbsolute;
+    const displacement =
+      (height - 0.5) *
+      ctx.reliefScale *
+      (resolved.reliefStrengthPercent / 100);
     reliefSampledVertices += 1;
     reliefHeightSum += height;
     reliefMinHeight = Math.min(reliefMinHeight, height);
@@ -1849,11 +1964,35 @@ export function bakeSceneToFaceColors(
     return { ...vertex, position: displaced };
   };
 
-  const outPositions: number[] = [];
-  const outNormals: number[] = [];
-  const outUvs: number[] = [];
-  const outColors: number[] = [];
-  const reliefPositionCache = new Map<string, ReliefPositionCacheEntry>();
+  interface BakeOutputBuffer {
+    key: string;
+    name: string;
+    positions: number[];
+    normals: number[];
+    uvs: number[];
+    colors: number[];
+    reliefPositionCache: Map<string, ReliefPositionCacheEntry>;
+  }
+
+  const outputBuffers = new Map<string, BakeOutputBuffer>();
+  const outputBufferForTriangle = (triangle: WorkTriangle): BakeOutputBuffer => {
+    const key = resolved.preserveModelParts ? triangle.partId : "__merged__";
+    const existing = outputBuffers.get(key);
+    if (existing) return existing;
+    const created: BakeOutputBuffer = {
+      key,
+      name: resolved.preserveModelParts
+        ? triangle.partName
+        : `${scene.name || "Model"} - baked merged`,
+      positions: [],
+      normals: [],
+      uvs: [],
+      colors: [],
+      reliefPositionCache: new Map<string, ReliefPositionCacheEntry>(),
+    };
+    outputBuffers.set(key, created);
+    return created;
+  };
   const workTriangles: WorkTriangle[] = [];
 
   const emitLeaf = (triangle: WorkTriangle): void => {
@@ -1861,24 +2000,31 @@ export function bakeSceneToFaceColors(
     let color: SrgbColor | null = null;
 
     if ((ctx.baseSampler || (resolved.bakeColorMode !== "baseColor" && ctx.emissiveSampler)) && triangle.vertices.every((vertex) => vertex.hasUv)) {
-      color = representativeTextureColorForTriangle(ctx, triangle, resolved.bakeColorMode);
+      color = representativeTextureColorForTriangle(
+        ctx,
+        triangle,
+        resolved.bakeColorMode,
+        colourCorrection,
+      );
       texturedTriangles += 1;
     } else if (vertexColor) {
-      color = vertexColor;
+      color = applyTextureColourCorrection(vertexColor, colourCorrection);
       vertexColorFallbackTriangles += 1;
     } else if (ctx.material) {
-      color = materialBaseColor(ctx.material);
+      color = applyTextureColourCorrection(materialBaseColor(ctx.material), colourCorrection);
       materialFallbackTriangles += 1;
     } else {
-      color = { ...DEFAULT_COLOR };
+      color = applyTextureColourCorrection({ ...DEFAULT_COLOR }, colourCorrection);
       missingMaterialTriangles += 1;
     }
 
-    color = applyTextureColourCorrection(color, colourCorrection);
-
     if (!triangle.vertices.every((vertex) => vertex.hasUv)) missingUvTriangles += 1;
 
-    const relief = reliefSourceForContext(ctx, resolved.reliefUsePbrProxy);
+    const relief = reliefSourceForContext(
+      ctx,
+      resolved.reliefUseNormalMap,
+      resolved.reliefUsePbrProxy,
+    );
     if (
       resolved.reliefEnabled &&
       (!relief.sampler || !triangle.vertices.every((vertex) => vertex.hasUv))
@@ -1886,11 +2032,16 @@ export function bakeSceneToFaceColors(
       reliefMissingSourceTriangles += 1;
     }
 
+    const output = outputBufferForTriangle(triangle);
     const linear = srgbToLinearFloats(color);
     for (const vertex of triangle.vertices) {
-      const reliefVertex = applyReliefToVertex(vertex, ctx, reliefPositionCache);
-      pushBakeVertex(outPositions, outNormals, outUvs, reliefVertex);
-      outColors.push(...linear);
+      const reliefVertex = applyReliefToVertex(
+        vertex,
+        ctx,
+        output.reliefPositionCache,
+      );
+      pushBakeVertex(output.positions, output.normals, output.uvs, reliefVertex);
+      output.colors.push(...linear);
     }
 
     const hex = srgbToHex(color);
@@ -1912,7 +2063,7 @@ export function bakeSceneToFaceColors(
   };
 
   scene.traverse((object) => {
-    if (!isMesh(object)) return;
+    if (!isMesh(object) || !object.visible) return;
     const sourceGeometry = object.geometry;
     const position = sourceGeometry.getAttribute("position");
     if (!position) return;
@@ -1935,6 +2086,10 @@ export function bakeSceneToFaceColors(
       if (!Number.isFinite(n.lengthSq()) || n.lengthSq() === 0) return fallback.clone();
       return n.normalize();
     };
+    const partMetadata = getSceneModelPartMetadata(object);
+    const sourcePartId = partMetadata?.id ?? `mesh-${meshCount}`;
+    const sourcePartName =
+      partMetadata?.name ?? (object.name.trim() || `Part ${meshCount}`);
 
     for (let triangleIndex = 0; triangleIndex < localTriangleCount; triangleIndex += 1) {
       const elementStart = triangleIndex * 3;
@@ -1943,6 +2098,16 @@ export function bakeSceneToFaceColors(
       const i2 = getIndexAt(index, elementStart, 2);
       const materialIndex = materialIndexForTriangle(sourceGeometry, elementStart);
       const material = materials[materialIndex] as MaterialWithColorMap | undefined;
+      if (!sourceGeometry.boundingBox) sourceGeometry.computeBoundingBox();
+      const meshBounds = sourceGeometry.boundingBox
+        ? sourceGeometry.boundingBox.clone().applyMatrix4(object.matrixWorld)
+        : null;
+      const meshDiagonal = Math.max(
+        meshBounds?.getSize(new THREE.Vector3()).length() ?? sceneDiagonal,
+        1e-6,
+      );
+      reliefScaleSum += meshDiagonal;
+      reliefScaleCount += 1;
       const ctx: MaterialSamplingContext = {
         material,
         baseSampler: getTextureSampler(material?.map, textureCache, resolved.textureMaxSize),
@@ -1954,16 +2119,23 @@ export function bakeSceneToFaceColors(
         aoSampler: getTextureSampler(material?.aoMap, textureCache, resolved.textureMaxSize),
         emissiveSampler: getTextureSampler(material?.emissiveMap, textureCache, resolved.textureMaxSize),
         alphaSampler: getTextureSampler(material?.alphaMap, textureCache, resolved.textureMaxSize),
+        reliefScale: meshDiagonal,
       };
 
       const hasReliefSource = Boolean(
         ctx.displacementSampler ||
           ctx.bumpSampler ||
+          (resolved.reliefUseNormalMap && ctx.normalSampler) ||
           (resolved.reliefUsePbrProxy &&
             (ctx.aoSampler || ctx.roughnessSampler || ctx.metalnessSampler)),
       );
       if (hasReliefSource) meshHasReliefSource = true;
-      if (resolved.reliefEnabled && !hasReliefSource && ctx.normalSampler)
+      if (
+        resolved.reliefEnabled &&
+        !hasReliefSource &&
+        ctx.normalSampler &&
+        !resolved.reliefUseNormalMap
+      )
         normalMapOnlyForRelief = true;
 
       triangleCount += 1;
@@ -2003,6 +2175,8 @@ export function bakeSceneToFaceColors(
         depth: 0,
         ctx,
         vertexColor: vertexColors ? vertexColorAt(vertexColors, i0, i1, i2) : null,
+        partId: sourcePartId,
+        partName: sourcePartName,
       };
 
       workTriangles.push(rootTriangle);
@@ -2020,21 +2194,41 @@ export function bakeSceneToFaceColors(
     : refineWorkTrianglesBalanced(workTriangles, meshBudget);
   for (const leaf of leafTriangles) emitLeaf(leaf);
 
-  if (outPositions.length > 0) {
+  for (const output of outputBuffers.values()) {
+    if (output.positions.length === 0) continue;
     const bakedGeometry = new THREE.BufferGeometry();
-    bakedGeometry.setAttribute("position", new THREE.Float32BufferAttribute(outPositions, 3));
-    bakedGeometry.setAttribute("normal", new THREE.Float32BufferAttribute(outNormals, 3));
-    bakedGeometry.setAttribute("uv", new THREE.Float32BufferAttribute(outUvs, 2));
-    bakedGeometry.setAttribute("color", new THREE.Float32BufferAttribute(outColors, 3));
+    bakedGeometry.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(output.positions, 3),
+    );
+    bakedGeometry.setAttribute(
+      "normal",
+      new THREE.Float32BufferAttribute(output.normals, 3),
+    );
+    bakedGeometry.setAttribute(
+      "uv",
+      new THREE.Float32BufferAttribute(output.uvs, 2),
+    );
+    bakedGeometry.setAttribute(
+      "color",
+      new THREE.Float32BufferAttribute(output.colors, 3),
+    );
     bakedGeometry.computeBoundingSphere();
     if (resolved.reliefEnabled) bakedGeometry.computeVertexNormals();
-    const bakedTopology = topologyDiagnosticsFromNonIndexedPositions(outPositions);
+    const bakedTopology = topologyDiagnosticsFromNonIndexedPositions(
+      output.positions,
+    );
     bakedOpenEdges += bakedTopology.openEdges;
     bakedNonManifoldEdges += bakedTopology.nonManifoldEdges;
 
     const bakedMaterial = createBakedMaterial();
     const bakedMesh = new THREE.Mesh(bakedGeometry, bakedMaterial);
-    bakedMesh.name = `${scene.name || "Model"} - baked merged`;
+    bakedMesh.name = output.name;
+    bakedMesh.userData = {
+      ...bakedMesh.userData,
+      colorMixPartId: output.key,
+      colorMixPartName: output.name,
+    };
     bakedRoot.add(bakedMesh);
   }
 
@@ -2070,15 +2264,19 @@ export function bakeSceneToFaceColors(
     );
   if (resolved.reliefEnabled && reliefSource === "none")
     warnings.add(
-      "Relief geometry is active, but no suitable relief source was found. For this model, consider AO/Roughness as an experimental proxy. Normal maps are not reconstructed as height yet.",
+      resolved.reliefUseNormalMap
+        ? "Relief geometry is active, but the selected normal-map reconstruction found no usable normal map. Choose a different relief mode or disable relief for this model."
+        : "Relief geometry is active, but no suitable relief source was found. Try a different relief mode that matches the available maps.",
     );
   if (normalMapOnlyForRelief)
     warnings.add(
-      "Normal map detected: it is used for subdivision, but not reconstructed as physical relief. A separate experimental step will be needed for that.",
+      "Normal map detected: it is used for subdivision, but not reconstructed as physical relief in the current relief mode.",
     );
   if (resolved.reliefEnabled && reliefSource !== "none")
     warnings.add(
-      "Physical relief was experimentally generated from a height/bump map or AO/Roughness proxy. With relief enabled, the app uses conforming edge splits instead of one-sided T-junctions so relief does not create open edges.",
+      reliefSource === "normalMap"
+        ? "Physical relief was experimentally reconstructed from the normal map. The result is a best-effort height field and may differ from the original shading."
+        : "Physical relief was experimentally generated from a height/bump map or AO/Roughness proxy. With relief enabled, the app uses conforming edge splits instead of one-sided T-junctions so relief does not create open edges.",
     );
   if (
     resolved.reliefEnabled &&
@@ -2158,6 +2356,9 @@ export function bakeSceneToFaceColors(
 
   const estimatedBakedGeometryBytes =
     bakedVertexCount * (3 * 4 + 3 * 4 + 2 * 4 + 3 * 4);
+  reliefStrengthAbsolute =
+    (reliefScaleCount > 0 ? reliefScaleSum / reliefScaleCount : sceneDiagonal) *
+    (resolved.reliefStrengthPercent / 100);
 
   return {
     scene: bakedRoot,

@@ -14,6 +14,7 @@ import type {
   MappingStrategyMode,
   MixingRecipeResolution,
   MeshModel,
+  MeshPart,
   PaletteEntry,
   PhysicalSlot,
   RGB,
@@ -21,7 +22,7 @@ import type {
   VirtualMixPriorityMode,
 } from "./core/types";
 import { adjustColour, defaultAdjustments, rgbToHex } from "./core/colour";
-import { parseObjFile } from "./core/objParser";
+import { filterMeshModelByPartIds, parseObjFile } from "./core/objParser";
 import { medianCutPalette } from "./core/quantize";
 import { downloadBlob, downloadText, paletteToCsv } from "./core/exportCsv";
 import {
@@ -70,6 +71,7 @@ import {
   type OrientationMatrix,
 } from "../common/modelOrientation";
 import type { PreviewDisplayMode } from "../common/previewRendering";
+import { EditableNumberInput } from "../common/EditableNumberInput";
 
 type View = "front" | "back" | "left" | "right" | "top" | "bottom";
 type PreviewMode = "adjusted" | "quantized" | "print";
@@ -110,6 +112,7 @@ type AssignmentOverride =
 
 type ProgressKind =
   | "load"
+  | "handoff"
   | "palette"
   | "preview"
   | "suggestion"
@@ -124,6 +127,7 @@ interface ProgressRun {
   steps: string[];
   activeIndex: number;
   percent: number;
+  detail?: string;
   error?: string;
 }
 
@@ -141,6 +145,7 @@ function ProgressDialog({ run }: { run: ProgressRun | null }) {
             style={{ width: `${Math.max(0, Math.min(100, run.percent))}%` }}
           />
         </div>
+        {run.detail ? <div className="progress-detail">{run.detail}</div> : null}
         <ul className="progress-steps">
           {run.steps.map((step, index) => (
             <li
@@ -674,14 +679,13 @@ function SliderRow({
           />
         )}
       </span>
-      <input
+      <EditableNumberInput
         className="number"
-        type="number"
         min={min}
         max={max}
         step={step}
         value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
+        onChange={onChange}
         disabled={disabled}
       />
     </label>
@@ -705,6 +709,7 @@ interface PaletteBlockEntry {
   label: string;
   title: string;
   selected?: boolean;
+  diagnosticSelected?: boolean;
 }
 
 function PaletteBlockMap({
@@ -734,7 +739,7 @@ function PaletteBlockMap({
           <button
             type="button"
             key={entry.key}
-            className={`colour-block${entry.selected ? " selected" : ""}${onToggle ? " clickable" : ""}`}
+            className={`colour-block${entry.selected ? " selected" : ""}${entry.diagnosticSelected ? " diagnostic-selected" : ""}${onToggle ? " clickable" : ""}`}
             style={{
               backgroundColor: rgbToHex(entry.rgb),
               color: textColour,
@@ -1323,7 +1328,7 @@ function recipeResolutionFromLegacyStep(value: number): MixingRecipeResolution {
 
 function normalizeRecipeResolution(
   value: unknown,
-  fallback: MixingRecipeResolution = "grid5",
+  fallback: MixingRecipeResolution = "grid10",
 ): MixingRecipeResolution {
   if (typeof value === "string") {
     if (RECIPE_RESOLUTION_OPTIONS.includes(value as MixingRecipeResolution))
@@ -1574,6 +1579,7 @@ function applyAssignmentOverridesToPlan(
     physicalOnly,
     paletteToAssignment,
     mappingDiagnostics: basePlan.mappingDiagnostics,
+    targetMappings: basePlan.targetMappings,
   };
 }
 
@@ -1589,6 +1595,28 @@ function paletteIndexPreview(indices: number[], maxItems = 8): string {
     .join(" ")} ...`;
 }
 
+function paletteIndicesForPlanAssignmentKey(
+  plan: VirtualExtruderPlan,
+  key: string,
+): number[] {
+  if (key.startsWith("v:")) {
+    const virtualId = Number(key.slice(2));
+    return (
+      plan.virtualBlends.find((entry) => entry.virtualId === virtualId)
+        ?.targetPaletteIndices ?? []
+    );
+  }
+  if (key.startsWith("p:")) {
+    const paletteIndex = Number(key.slice(2));
+    const physicalEntry = plan.physicalOnly.find(
+      (entry) => entry.paletteIndex === paletteIndex,
+    );
+    if (physicalEntry) return physicalEntry.targetPaletteIndices;
+    return Number.isFinite(paletteIndex) ? [paletteIndex] : [];
+  }
+  return [];
+}
+
 function isDefaultAdjustments(adj: ColourAdjustments): boolean {
   return (
     adj.brightness === defaultAdjustments.brightness &&
@@ -1601,8 +1629,16 @@ function isDefaultAdjustments(adj: ColourAdjustments): boolean {
   );
 }
 
+interface VertexHandoffInfo {
+  objectHandling: "merge" | "separate";
+  sourcePartCount: number;
+  selectedPartCount: number;
+  exportedObjectCount: number;
+}
+
 interface VertexColorMixAppProps {
   incomingObjFile?: File | null;
+  incomingObjHandoffInfo?: VertexHandoffInfo | null;
   incomingObjNonce?: number;
   focusLoadTabNonce?: number;
   onIncomingObjConsumed?: () => void;
@@ -1614,6 +1650,7 @@ interface VertexColorMixAppProps {
 
 export default function App({
   incomingObjFile = null,
+  incomingObjHandoffInfo = null,
   incomingObjNonce = 0,
   focusLoadTabNonce = 0,
   onIncomingObjConsumed,
@@ -1635,6 +1672,10 @@ export default function App({
   const [forceThreePreview, setForceThreePreview] = useState(false);
 
   const [model, setModel] = useState<MeshModel | null>(null);
+  const [loadedObjHandoffInfo, setLoadedObjHandoffInfo] =
+    useState<VertexHandoffInfo | null>(null);
+  const [modelParts, setModelParts] = useState<MeshPart[]>([]);
+  const [enabledModelPartIds, setEnabledModelPartIds] = useState<string[]>([]);
   const [fineRotationAxis, setFineRotationAxis] =
     useState<ModelRotationAxis>("z");
   const [fineRotationAngle, setFineRotationAngle] = useState(0);
@@ -1665,9 +1706,9 @@ export default function App({
   const [pendingMaxColours, setPendingMaxColours] = useState(128);
   const [appliedMaxColours, setAppliedMaxColours] = useState(128);
   const [pendingRecipeResolution, setPendingRecipeResolution] =
-    useState<MixingRecipeResolution>("grid5");
+    useState<MixingRecipeResolution>("grid10");
   const [appliedRecipeResolution, setAppliedRecipeResolution] =
-    useState<MixingRecipeResolution>("grid5");
+    useState<MixingRecipeResolution>("grid10");
   const [pendingColourAssignmentMode, setPendingColourAssignmentMode] =
     useState<ColourAssignmentMode>("physical-and-virtual");
   const [appliedColourAssignmentMode, setAppliedColourAssignmentMode] =
@@ -1722,7 +1763,7 @@ export default function App({
     () => getSystemTheme(),
   );
   const [previewDisplayMode, setPreviewDisplayMode] =
-    useState<PreviewDisplayMode>("flat");
+    useState<PreviewDisplayMode>("shaded");
   const [wireframe, setWireframe] = useState(false);
   const [showAxes, setShowAxes] = useState(false);
   const [webglLodMode, setWebglLodMode] = useState<WebglLodMode>("off");
@@ -1798,6 +1839,10 @@ export default function App({
   const [selectedAssignmentKeys, setSelectedAssignmentKeys] = useState<
     string[]
   >([]);
+  const [mappingDiagnosticPaletteIndex, setMappingDiagnosticPaletteIndex] =
+    useState<number | null>(null);
+  const [mappingDiagnosticAssignmentKey, setMappingDiagnosticAssignmentKey] =
+    useState<string | null>(null);
   const [assignmentTargetExtruder, setAssignmentTargetExtruder] = useState(1);
   const [suggestionExpertSettings, setSuggestionExpertSettings] =
     useState<SuggestionExpertSettings>(DEFAULT_SUGGESTION_EXPERT_SETTINGS);
@@ -1951,6 +1996,7 @@ export default function App({
     left: false,
     print: false,
   });
+  const sourceModelRef = useRef<MeshModel | null>(null);
   const baseModelRef = useRef<MeshModel | null>(null);
   const orientationMatrixRef = useRef<OrientationMatrix>([
     ...IDENTITY_ORIENTATION_MATRIX,
@@ -2154,6 +2200,17 @@ export default function App({
     schedulePreviewProgressFallback(threePreviewSteps);
   }
 
+  const handoffLoadSteps = useMemo(
+    () => [
+      t.progressHandoffReceive,
+      t.progressHandoffParse,
+      t.progressHandoffParts,
+      t.progressHandoffStats,
+      t.progressHandoffPreview,
+      t.progressHandoffReady,
+    ],
+    [t],
+  );
   const loadSteps = useMemo(
     () => [
       t.progressLoadCollectFiles,
@@ -2270,8 +2327,7 @@ export default function App({
       }
       if (pendingObjFile) {
         showProgress("load", t.progressLoadTitle, loadSteps, 3);
-        await onObjFile(pendingObjFile);
-        setActiveTab("physical");
+        await onObjFile(pendingObjFile, { jumpToPhysical: false });
       } else {
         setStatus(t.selectedFilesLoaded);
       }
@@ -2343,15 +2399,45 @@ export default function App({
 
   async function onObjFile(
     file: File,
-    options: { jumpToPhysical?: boolean } = {},
+    options: {
+      jumpToPhysical?: boolean;
+      handoffInfo?: VertexHandoffInfo | null;
+    } = {},
   ) {
-    const jumpToPhysical = options.jumpToPhysical ?? true;
+    const jumpToPhysical = options.jumpToPhysical ?? false;
+    const handoffInfo = options.handoffInfo ?? null;
+    const isTextureHandoff = Boolean(handoffInfo);
+    const handoffDetail = handoffInfo
+      ? `${handoffInfo.exportedObjectCount} ${
+          handoffInfo.exportedObjectCount === 1 ? "object" : "objects"
+        } · ${handoffInfo.selectedPartCount} of ${handoffInfo.sourcePartCount} source parts`
+      : undefined;
+
+    if (isTextureHandoff) {
+      setProgressRun({
+        kind: "handoff",
+        title: t.progressHandoffTitle,
+        steps: handoffLoadSteps,
+        activeIndex: 0,
+        percent: 2,
+        detail: handoffDetail,
+      });
+      await yieldToUi(30);
+    }
+
     setFileLoadBusy(true);
     setStatus(t.loadingFile);
     setModel(null);
+    setLoadedObjHandoffInfo(null);
+    sourceModelRef.current = null;
     baseModelRef.current = null;
+    setModelParts([]);
+    setEnabledModelPartIds([]);
     orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
-    setLargeModelComputationsDeferred(false);
+    // During a handoff, keep expensive palette/preview computations paused until
+    // the parsed model and its part/statistics UI have been committed. This lets
+    // the progress dialog paint before the heavy post-processing begins.
+    setLargeModelComputationsDeferred(isTextureHandoff);
     setThreePreviewRequested(true);
     setForceThreePreview(false);
     setPreviewCameraSyncState(null);
@@ -2359,9 +2445,22 @@ export default function App({
     setSlots([]);
     setAssignmentOverrides({});
     setSelectedAssignmentKeys([]);
-    await new Promise((resolve) => window.setTimeout(resolve, 40));
+    await yieldToUi(40);
     const fileHeader = await readFileHeaderText(file);
     const forceKeepCoordinateMode = isPrinterSpaceTextureBakingObjHeader(fileHeader);
+
+    if (isTextureHandoff) {
+      setProgressRun({
+        kind: "handoff",
+        title: t.progressHandoffTitle,
+        steps: handoffLoadSteps,
+        activeIndex: 1,
+        percent: 5,
+        detail: handoffDetail,
+      });
+      await yieldToUi(20);
+    }
+
     try {
       const parsed = await parseObjFile(file, (progress) => {
         if (progress.totalBytes && progress.loadedBytes !== undefined) {
@@ -2373,20 +2472,64 @@ export default function App({
             ? ` · ${progress.triangleCount.toLocaleString()} triangles`
             : "";
           setStatus(`${t.parsingObj} ${pct}%${tris}`);
+          if (isTextureHandoff) {
+            const mbLoaded = progress.loadedBytes / (1024 * 1024);
+            const mbTotal = progress.totalBytes / (1024 * 1024);
+            setProgressRun({
+              kind: "handoff",
+              title: t.progressHandoffTitle,
+              steps: handoffLoadSteps,
+              activeIndex: 1,
+              percent: 5 + pct * 0.65,
+              detail: `${pct}% · ${mbLoaded.toFixed(1)} / ${mbTotal.toFixed(1)} MB${tris}`,
+            });
+          }
         } else {
           setStatus(t.parsingObj);
         }
       });
-      setLargeModelComputationsDeferred(false);
+
+      if (isTextureHandoff) {
+        setProgressRun({
+          kind: "handoff",
+          title: t.progressHandoffTitle,
+          steps: handoffLoadSteps,
+          activeIndex: 2,
+          percent: 72,
+          detail: `${parsed.parts.length} model ${parsed.parts.length === 1 ? "part" : "parts"} · ${parsed.stats.triangleCount.toLocaleString()} triangles`,
+        });
+        await yieldToUi(25);
+      } else {
+        setLargeModelComputationsDeferred(false);
+      }
+
       const safeModelName = safeFileDisplayName(
         parsed.name || file.name,
         "model.obj",
       );
       modelFileRef.current = file;
       const loadedModel = { ...parsed, name: safeModelName };
+      const allPartIds = loadedModel.parts.map((part) => part.id);
+      sourceModelRef.current = loadedModel;
       baseModelRef.current = loadedModel;
+      setModelParts(loadedModel.parts);
+      setEnabledModelPartIds(allPartIds);
       orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
+
+      if (isTextureHandoff) {
+        setProgressRun({
+          kind: "handoff",
+          title: t.progressHandoffTitle,
+          steps: handoffLoadSteps,
+          activeIndex: 3,
+          percent: 80,
+          detail: `${loadedModel.stats.vertexCount.toLocaleString()} vertices · ${loadedModel.stats.triangleCount.toLocaleString()} triangles · ${loadedModel.stats.uniqueFaceColors.toLocaleString()} face colours`,
+        });
+        await yieldToUi(25);
+      }
+
       setModel(modelWithOrientationMatrix(loadedModel, orientationMatrixRef.current));
+      setLoadedObjHandoffInfo(handoffInfo);
       // Always derive the export filename from the currently loaded model.
       // This keeps the export target predictable when users switch between OBJ files.
       setExportFileName(exportFileNameForModel(safeModelName));
@@ -2398,11 +2541,52 @@ export default function App({
         setExportCoordinateMode("keep");
         setStatus("Texture Baking OBJ loaded. Coordinate mode: keep.");
       }
+
+      if (isTextureHandoff) {
+        // Allow the lightweight Load page (parts + statistics) to paint first.
+        await yieldToUi(40);
+        setProgressRun({
+          kind: "handoff",
+          title: t.progressHandoffTitle,
+          steps: handoffLoadSteps,
+          activeIndex: 4,
+          percent: 88,
+          detail: "Building colour data and WebGL preview…",
+        });
+        await yieldToUi(25);
+        setLargeModelComputationsDeferred(false);
+        // React now performs the existing palette/preview preparation. The dialog
+        // remains visible while that synchronous work is in progress.
+        await yieldToUi(100);
+        setProgressRun({
+          kind: "handoff",
+          title: t.progressHandoffTitle,
+          steps: handoffLoadSteps,
+          activeIndex: 5,
+          percent: 100,
+          detail: `${loadedModel.parts.length} ${loadedModel.parts.length === 1 ? "object" : "objects"} ready`,
+        });
+        window.setTimeout(() => setProgressRun(null), 800);
+      } else {
+        setLargeModelComputationsDeferred(false);
+      }
+
       if (jumpToPhysical) setActiveTab("physical");
     } catch (err) {
-      setStatus(
-        `${t.error}: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      setStatus(`${t.error}: ${message}`);
+      if (isTextureHandoff) {
+        setProgressRun({
+          kind: "handoff",
+          title: t.progressHandoffTitle,
+          steps: handoffLoadSteps,
+          activeIndex: 1,
+          percent: 0,
+          detail: handoffDetail,
+          error: message,
+        });
+        window.setTimeout(() => setProgressRun(null), 1800);
+      }
     } finally {
       setFileLoadBusy(false);
     }
@@ -2411,7 +2595,10 @@ export default function App({
   useEffect(() => {
     if (!incomingObjFile) return;
     setActiveTab("model");
-    void onObjFile(incomingObjFile, { jumpToPhysical: false }).finally(() => {
+    void onObjFile(incomingObjFile, {
+      jumpToPhysical: false,
+      handoffInfo: incomingObjHandoffInfo,
+    }).finally(() => {
       setActiveTab("model");
       onIncomingObjConsumed?.();
     });
@@ -2496,6 +2683,47 @@ export default function App({
         applyOrientationMatrixToVec3(vertex, matrix),
       ),
     };
+  }
+
+  function applyVertexPartSelection(nextIds: string[]): void {
+    const sourceModel = sourceModelRef.current;
+    if (!sourceModel) return;
+
+    setEnabledModelPartIds(nextIds);
+    setPalette([]);
+    setAssignmentOverrides({});
+    setSelectedAssignmentKeys([]);
+    setPreviewCameraSyncState(null);
+
+    if (nextIds.length === 0) {
+      baseModelRef.current = null;
+      setModel(null);
+      setStatus(`Model parts: 0 of ${modelParts.length} selected.`);
+      return;
+    }
+
+    const filteredModel = filterMeshModelByPartIds(
+      sourceModel,
+      new Set(nextIds),
+    );
+    baseModelRef.current = filteredModel;
+    setModel(
+      modelWithOrientationMatrix(
+        filteredModel,
+        orientationMatrixRef.current,
+      ),
+    );
+    setStatus(
+      `Model parts: ${nextIds.length} of ${modelParts.length} selected.`,
+    );
+    window.requestAnimationFrame(fitPreviewViews);
+  }
+
+  function toggleVertexModelPart(partId: string, enabled: boolean): void {
+    const nextIds = enabled
+      ? [...enabledModelPartIds, partId]
+      : enabledModelPartIds.filter((id) => id !== partId);
+    applyVertexPartSelection(nextIds);
   }
 
   function setVertexModelOrientationMatrix(
@@ -3706,7 +3934,6 @@ export default function App({
       virtualStartId: physicalExtruders + 1,
       purePhysicalThreshold: 0.985,
       recipeResolution: appliedRecipeResolution,
-      accentProtection: appliedAccentProtection,
       mixPriority: appliedVirtualMixPriority,
       mappingStrategy: appliedMappingStrategy,
       colourDifferenceMetric: appliedColourDifferenceMetric,
@@ -3721,7 +3948,6 @@ export default function App({
     appliedRecipeResolution,
     appliedColourAssignmentMode,
     appliedMaxVirtualMixComponents,
-    appliedAccentProtection,
     appliedVirtualMixPriority,
     appliedMappingStrategy,
     appliedColourDifferenceMetric,
@@ -3816,7 +4042,10 @@ export default function App({
     waitingForThreePreviewProgressRef.current = false;
     setProgressRun(null);
     setModel(null);
+    sourceModelRef.current = null;
     baseModelRef.current = null;
+    setModelParts([]);
+    setEnabledModelPartIds([]);
     orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
     setLargeModelComputationsDeferred(false);
     setThreePreviewRequested(false);
@@ -3862,7 +4091,7 @@ export default function App({
         await onFilamentListFile(filamentFile);
       }
       showProgress("load", t.progressLoadTitle, loadSteps, 3);
-      await onObjFile(objFile);
+      await onObjFile(objFile, { handoffInfo: loadedObjHandoffInfo });
       showProgress("load", t.progressLoadTitle, loadSteps, 4);
       await yieldToUi(80);
     } catch (err) {
@@ -3910,6 +4139,31 @@ export default function App({
     [palette],
   );
 
+  const diagnosticAssignmentPaletteIndices = useMemo(
+    () =>
+      mappingDiagnosticAssignmentKey
+        ? paletteIndicesForPlanAssignmentKey(
+            virtualExtruderPlan,
+            mappingDiagnosticAssignmentKey,
+          )
+        : [],
+    [mappingDiagnosticAssignmentKey, virtualExtruderPlan],
+  );
+
+  const mappingDiagnosticPaletteIndices = useMemo(
+    () =>
+      mappingDiagnosticAssignmentKey
+        ? diagnosticAssignmentPaletteIndices
+        : mappingDiagnosticPaletteIndex === null
+          ? []
+          : [mappingDiagnosticPaletteIndex],
+    [
+      diagnosticAssignmentPaletteIndices,
+      mappingDiagnosticAssignmentKey,
+      mappingDiagnosticPaletteIndex,
+    ],
+  );
+
   const paletteBlockEntries = useMemo<PaletteBlockEntry[]>(
     () =>
       sortedPaletteForDisplay.map((entry) => ({
@@ -3917,10 +4171,129 @@ export default function App({
         rgb: entry.rgb,
         count: entry.count,
         label: `#${entry.index}`,
-        title: `#${entry.index} · ${rgbToHex(entry.rgb)} · ${entry.count.toLocaleString()} ${t.trianglesShort}`,
+        title: `#${entry.index} · ${rgbToHex(entry.rgb)} · ${entry.count.toLocaleString()} ${t.trianglesShort} · ${t.mappingDiagnosticsSelect}`,
+        selected: mappingDiagnosticPaletteIndices.includes(entry.index),
       })),
-    [sortedPaletteForDisplay, t.trianglesShort],
+    [
+      sortedPaletteForDisplay,
+      t.trianglesShort,
+      t.mappingDiagnosticsSelect,
+      mappingDiagnosticPaletteIndices,
+    ],
   );
+
+  const selectedMappingDiagnostic = useMemo(
+    () =>
+      mappingDiagnosticPaletteIndex === null
+        ? null
+        : baseVirtualExtruderPlan.targetMappings.find(
+            (entry) => entry.paletteIndex === mappingDiagnosticPaletteIndex,
+          ) ?? null,
+    [baseVirtualExtruderPlan, mappingDiagnosticPaletteIndex],
+  );
+
+  useEffect(() => {
+    if (mappingDiagnosticAssignmentKey) {
+      const indices = paletteIndicesForPlanAssignmentKey(
+        virtualExtruderPlan,
+        mappingDiagnosticAssignmentKey,
+      );
+      if (indices.length === 0) {
+        setMappingDiagnosticAssignmentKey(null);
+        setMappingDiagnosticPaletteIndex(null);
+        return;
+      }
+      if (
+        mappingDiagnosticPaletteIndex === null ||
+        !indices.includes(mappingDiagnosticPaletteIndex)
+      ) {
+        setMappingDiagnosticPaletteIndex(indices[0]);
+      }
+      return;
+    }
+    if (mappingDiagnosticPaletteIndex === null) return;
+    if (!palette.some((entry) => entry.index === mappingDiagnosticPaletteIndex))
+      setMappingDiagnosticPaletteIndex(null);
+  }, [
+    palette,
+    virtualExtruderPlan,
+    mappingDiagnosticAssignmentKey,
+    mappingDiagnosticPaletteIndex,
+  ]);
+
+  const handleMappingDiagnosticPalettePick = useCallback(
+    (paletteIndex: number | null) => {
+      const switchingFromAssignment = mappingDiagnosticAssignmentKey !== null;
+      setMappingDiagnosticAssignmentKey(null);
+      setMappingDiagnosticPaletteIndex((current) => {
+        if (paletteIndex === null) return null;
+        if (!switchingFromAssignment && current === paletteIndex) return null;
+        return paletteIndex;
+      });
+    },
+    [mappingDiagnosticAssignmentKey],
+  );
+
+  const handleMappingDiagnosticAssignmentPick = useCallback(
+    (key: string) => {
+      setMappingDiagnosticAssignmentKey((current) => {
+        if (current === key) {
+          setMappingDiagnosticPaletteIndex(null);
+          return null;
+        }
+        const indices = paletteIndicesForPlanAssignmentKey(
+          virtualExtruderPlan,
+          key,
+        );
+        setMappingDiagnosticPaletteIndex(indices[0] ?? null);
+        return indices.length > 0 ? key : null;
+      });
+    },
+    [virtualExtruderPlan],
+  );
+
+  const paletteTriangleCount = useMemo(
+    () => palette.reduce((sum, entry) => sum + Math.max(0, entry.count), 0),
+    [palette],
+  );
+
+  const mappingDiagnosticTriangleCount = useMemo(() => {
+    if (mappingDiagnosticPaletteIndices.length === 0) return 0;
+    const selected = new Set(mappingDiagnosticPaletteIndices);
+    return palette.reduce(
+      (sum, entry) =>
+        selected.has(entry.index) ? sum + Math.max(0, entry.count) : sum,
+      0,
+    );
+  }, [palette, mappingDiagnosticPaletteIndices]);
+
+  const mappingDiagnosticEffectiveAssignmentKey = useMemo(() => {
+    if (mappingDiagnosticAssignmentKey) return mappingDiagnosticAssignmentKey;
+    if (mappingDiagnosticPaletteIndex === null) return null;
+    const virtual = virtualExtruderPlan.virtualBlends.find((entry) =>
+      entry.targetPaletteIndices.includes(mappingDiagnosticPaletteIndex),
+    );
+    if (virtual) return `v:${virtual.virtualId}`;
+    const physical = virtualExtruderPlan.physicalOnly.find((entry) =>
+      entry.targetPaletteIndices.includes(mappingDiagnosticPaletteIndex),
+    );
+    return physical ? `p:${physical.paletteIndex}` : null;
+  }, [
+    mappingDiagnosticAssignmentKey,
+    mappingDiagnosticPaletteIndex,
+    virtualExtruderPlan,
+  ]);
+
+  const mappingDiagnosticAssignmentLabel = useMemo(() => {
+    const key = mappingDiagnosticEffectiveAssignmentKey;
+    if (!key) return null;
+    if (key.startsWith("v:")) return `VE${Number(key.slice(2))}`;
+    const paletteIndex = Number(key.slice(2));
+    const physical = virtualExtruderPlan.physicalOnly.find(
+      (entry) => entry.paletteIndex === paletteIndex,
+    );
+    return physical ? `E${physical.physicalExtruder}` : null;
+  }, [mappingDiagnosticEffectiveAssignmentKey, virtualExtruderPlan]);
 
   const effectiveColourBlockEntries = useMemo<PaletteBlockEntry[]>(() => {
     const entries: PaletteBlockEntry[] = [
@@ -3929,16 +4302,20 @@ export default function App({
         rgb: entry.displayRgb,
         count: entry.triangleCount,
         label: `VE${entry.virtualId}`,
-        title: `VE${entry.virtualId} · ${rgbToHex(entry.displayRgb)} · ${entry.triangleCount.toLocaleString()} ${t.trianglesShort} · ${paletteIndexPreview(entry.targetPaletteIndices, 8)}`,
+        title: `VE${entry.virtualId} · ${rgbToHex(entry.displayRgb)} · ${entry.triangleCount.toLocaleString()} ${t.trianglesShort} · ${paletteIndexPreview(entry.targetPaletteIndices, 8)} · ${t.mappingDiagnosticsSelect}`,
         selected: selectedAssignmentKeys.includes(`v:${entry.virtualId}`),
+        diagnosticSelected:
+          mappingDiagnosticEffectiveAssignmentKey === `v:${entry.virtualId}`,
       })),
       ...virtualExtruderPlan.physicalOnly.map((entry) => ({
         key: `p:${entry.paletteIndex}`,
         rgb: entry.physicalRgb,
         count: entry.triangleCount,
         label: `E${entry.physicalExtruder}`,
-        title: `E${entry.physicalExtruder} · ${entry.triangleCount.toLocaleString()} ${t.trianglesShort} · ${paletteIndexPreview(entry.targetPaletteIndices, 8)}`,
+        title: `E${entry.physicalExtruder} · ${entry.triangleCount.toLocaleString()} ${t.trianglesShort} · ${paletteIndexPreview(entry.targetPaletteIndices, 8)} · ${t.mappingDiagnosticsSelect}`,
         selected: selectedAssignmentKeys.includes(`p:${entry.paletteIndex}`),
+        diagnosticSelected:
+          mappingDiagnosticEffectiveAssignmentKey === `p:${entry.paletteIndex}`,
       })),
     ];
     return entries.sort(
@@ -3947,7 +4324,13 @@ export default function App({
         b.count - a.count ||
         compareText(a.label, b.label),
     );
-  }, [virtualExtruderPlan, selectedAssignmentKeys, t.trianglesShort]);
+  }, [
+    virtualExtruderPlan,
+    selectedAssignmentKeys,
+    mappingDiagnosticEffectiveAssignmentKey,
+    t.trianglesShort,
+    t.mappingDiagnosticsSelect,
+  ]);
 
   const filteredVirtualBlends = useMemo(() => {
     if (virtualPlanFilter === "physical") return [];
@@ -3971,23 +4354,7 @@ export default function App({
   }, [virtualExtruderPlan, virtualPlanFilter]);
 
   function paletteIndicesForAssignmentKey(key: string): number[] {
-    if (key.startsWith("v:")) {
-      const virtualId = Number(key.slice(2));
-      return (
-        virtualExtruderPlan.virtualBlends.find(
-          (entry) => entry.virtualId === virtualId,
-        )?.targetPaletteIndices ?? []
-      );
-    }
-    if (key.startsWith("p:")) {
-      const paletteIndex = Number(key.slice(2));
-      const physicalEntry = virtualExtruderPlan.physicalOnly.find(
-        (entry) => entry.paletteIndex === paletteIndex,
-      );
-      if (physicalEntry) return physicalEntry.targetPaletteIndices;
-      return Number.isFinite(paletteIndex) ? [paletteIndex] : [];
-    }
-    return [];
+    return paletteIndicesForPlanAssignmentKey(virtualExtruderPlan, key);
   }
 
   const selectedPaletteIndices = useMemo(() => {
@@ -4513,8 +4880,23 @@ export default function App({
                       <strong>
                         {pendingObjFile
                           ? fileSummary(pendingObjFile)
-                          : t.chooseFile}
+                          : model
+                            ? t.replaceObjFile
+                            : t.chooseFile}
                       </strong>
+                      {pendingObjFile ? (
+                        <small className="staged-file-status">
+                          {t.selectedReplacement}
+                        </small>
+                      ) : model ? (
+                        <small className="staged-file-status">
+                          {loadedObjHandoffInfo
+                            ? t.loadedFromTextureBaking
+                            : t.loaded}
+                          {` · ${model.name} · ${modelParts.length} ${modelParts.length === 1 ? "part" : "parts"}`}
+                          {` · ${t.clickToReplace}`}
+                        </small>
+                      ) : null}
                       <input
                         disabled={fileLoadBusy}
                         type="file"
@@ -4533,8 +4915,23 @@ export default function App({
                       <strong>
                         {pendingTemplateFile
                           ? fileSummary(pendingTemplateFile)
-                          : t.optionalFile}
+                          : templateInfo
+                            ? safeFileDisplayName(
+                                templateInfo.fileName,
+                                "template.3mf",
+                              )
+                            : t.optionalFile}
                       </strong>
+                      {pendingTemplateFile ? (
+                        <small className="staged-file-status">
+                          {t.selectedReplacement}
+                        </small>
+                      ) : templateInfo ? (
+                        <small className="staged-file-status">
+                          {t.loaded}
+                          {` · ${t.clickToReplace}`}
+                        </small>
+                      ) : null}
                       <input
                         disabled={fileLoadBusy}
                         type="file"
@@ -4553,8 +4950,23 @@ export default function App({
                       <strong>
                         {pendingFilamentListFile
                           ? fileSummary(pendingFilamentListFile)
-                          : t.optionalFile}
+                          : filamentListName
+                            ? safeFileDisplayName(
+                                filamentListName,
+                                "filaments.txt",
+                              )
+                            : t.optionalFile}
                       </strong>
+                      {pendingFilamentListFile ? (
+                        <small className="staged-file-status">
+                          {t.selectedReplacement}
+                        </small>
+                      ) : filamentListName ? (
+                        <small className="staged-file-status">
+                          {t.loaded}
+                          {` · ${t.clickToReplace}`}
+                        </small>
+                      ) : null}
                       <input
                         disabled={fileLoadBusy}
                         type="file"
@@ -4602,16 +5014,22 @@ export default function App({
                       onClick={handleLoadSelectedInputs}
                       title={t.tipLoadSelectedFiles}
                     >
-                      {fileLoadBusy ? t.loading : t.loadSelectedFiles}
+                      {fileLoadBusy
+                        ? t.loading
+                        : model || templateInfo || filamentListName
+                          ? t.applySelectedFiles
+                          : t.loadSelectedFiles}
                     </button>
                     <button
                       type="button"
                       className="secondary"
                       disabled={
-                        fileLoadBusy &&
-                        !pendingObjFile &&
-                        !pendingTemplateFile &&
-                        !pendingFilamentListFile
+                        fileLoadBusy ||
+                        !(
+                          pendingObjFile ||
+                          pendingTemplateFile ||
+                          pendingFilamentListFile
+                        )
                       }
                       onClick={() => {
                         setPendingObjFile(null);
@@ -4620,9 +5038,21 @@ export default function App({
                         setFilePickerResetKey((value) => value + 1);
                       }}
                     >
-                      {t.clearSelection}
+                      {t.clearPendingSelection}
                     </button>
                   </div>
+
+                  {model && loadedObjHandoffInfo && (
+                    <div className="handoff-load-status">
+                      <b>{t.handoffStatusTitle}</b>
+                      <span>
+                        {loadedObjHandoffInfo.objectHandling === "merge"
+                          ? `1 ${t.handoffMergedObject}`
+                          : `${modelParts.length} ${t.handoffObjectsReceived}`}
+                        {` · ${loadedObjHandoffInfo.selectedPartCount} of ${loadedObjHandoffInfo.sourcePartCount} ${t.handoffSourceParts}`}
+                      </span>
+                    </div>
+                  )}
 
                   {model ? (
                     <div className="stats">
@@ -4632,6 +5062,10 @@ export default function App({
                         <b className="model-name-value" title={model.name}>
                           {model.name}
                         </b>
+                      </div>
+                      <div>
+                        <span>{t.modelParts}</span>
+                        <b>{modelParts.length.toLocaleString()}</b>
                       </div>
                       <div>
                         <span>{t.vertices}</span>
@@ -4652,6 +5086,84 @@ export default function App({
                     </div>
                   ) : (
                     <p className="muted">{t.noModel}</p>
+                  )}
+
+                  {modelParts.length > 1 && (
+                    <div className="model-parts-panel">
+                      <div className="model-parts-header">
+                        <div>
+                          <b>Model parts</b>
+                          <span className="muted">
+                            {enabledModelPartIds.length} of {modelParts.length} selected
+                          </span>
+                        </div>
+                        <div className="model-parts-actions">
+                          <button
+                            type="button"
+                            className="secondary compact"
+                            disabled={
+                              globalBusy ||
+                              enabledModelPartIds.length === modelParts.length
+                            }
+                            onClick={() =>
+                              applyVertexPartSelection(
+                                modelParts.map((part) => part.id),
+                              )
+                            }
+                          >
+                            Select all
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary compact"
+                            disabled={globalBusy || enabledModelPartIds.length === 0}
+                            onClick={() => applyVertexPartSelection([])}
+                          >
+                            Select none
+                          </button>
+                        </div>
+                      </div>
+                      <div className="model-parts-list">
+                        {modelParts.map((part) => {
+                          const checked = enabledModelPartIds.includes(part.id);
+                          return (
+                            <label
+                              key={part.id}
+                              className="model-part-row"
+                              title="Selected parts are included in palette calculation, preview and export."
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                disabled={globalBusy}
+                                onChange={(event) =>
+                                  toggleVertexModelPart(
+                                    part.id,
+                                    event.currentTarget.checked,
+                                  )
+                                }
+                              />
+                              <span className="model-part-main">
+                                <b>{part.name}</b>
+                                <small>
+                                  {part.triangleCount.toLocaleString()} triangles ·{" "}
+                                  {part.source === "object"
+                                    ? "OBJ object"
+                                    : part.source === "group"
+                                      ? "OBJ group"
+                                      : "OBJ part"}
+                                </small>
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                      <p className="muted note">
+                        Deselected parts are excluded from the current palette,
+                        preview and export. Selected model parts are preserved as
+                        separate objects in the exported 3MF.
+                      </p>
+                    </div>
                   )}
 
                   <div className="loaded-input-summary">
@@ -4726,18 +5238,13 @@ export default function App({
                       <HelpLabel title={t.tipFineRotation}>
                         {t.rotationAngle}
                       </HelpLabel>
-                      <input
-                        type="number"
+                      <EditableNumberInput
                         min={-180}
                         max={180}
                         step={1}
                         value={fineRotationAngle}
                         disabled={!baseModelRef.current || globalBusy}
-                        onChange={(e) =>
-                          setFineRotationAngle(
-                            Math.round(Math.max(-180, Math.min(180, Number(e.target.value) || 0))),
-                          )
-                        }
+                        onChange={(value) => setFineRotationAngle(Math.round(value))}
                       />
                     </label>
                   </div>
@@ -5027,12 +5534,100 @@ export default function App({
                 <PaletteBlockMap
                   entries={paletteBlockEntries}
                   emptyLabel={t.noPaletteYet}
+                  onToggle={(key) => {
+                    const paletteIndex = Number(key.replace("palette:", ""));
+                    if (!Number.isFinite(paletteIndex)) return;
+                    handleMappingDiagnosticPalettePick(paletteIndex);
+                  }}
                 />
                 <p className="muted small-note">
                   {palette.length > 0
                     ? `${palette.length} ${t.paletteColoursGenerated} · ${t.paletteSortedBySpectrum}`
                     : t.noPaletteYet}
                 </p>
+                <details className="mapping-diagnostics">
+                  <summary>
+                    {t.mappingDiagnostics}
+                    {mappingDiagnosticAssignmentKey &&
+                    mappingDiagnosticAssignmentLabel
+                      ? ` · ${mappingDiagnosticAssignmentLabel}`
+                      : selectedMappingDiagnostic
+                        ? ` · #${selectedMappingDiagnostic.paletteIndex}`
+                        : ""}
+                  </summary>
+                  {!selectedMappingDiagnostic ? (
+                    <p className="muted small-note">
+                      {t.mappingDiagnosticsHint}
+                    </p>
+                  ) : (
+                    <div className="mapping-diagnostics-grid">
+                      {mappingDiagnosticPaletteIndices.length > 1 && (
+                        <>
+                          <span>{t.mappingDiagnosticsTargetColours}</span>
+                          <b>
+                            {paletteIndexPreview(
+                              mappingDiagnosticPaletteIndices,
+                              16,
+                            )}
+                          </b>
+                        </>
+                      )}
+                      <span>{t.mappingDiagnosticsTarget}</span>
+                      <b>
+                        #{selectedMappingDiagnostic.paletteIndex} · {rgbToHex(selectedMappingDiagnostic.targetRgb)} · RGB {selectedMappingDiagnostic.targetRgb.join(", ")}
+                      </b>
+                      <span>{t.mappingDiagnosticsTargetLab}</span>
+                      <b>
+                        L* {selectedMappingDiagnostic.targetLab.L.toFixed(1)} · a* {selectedMappingDiagnostic.targetLab.a.toFixed(1)} · b* {selectedMappingDiagnostic.targetLab.b.toFixed(1)}
+                      </b>
+                      <span>{t.mappingDiagnosticsCoverage}</span>
+                      <b>
+                        {mappingDiagnosticPaletteIndices.length > 0 &&
+                        paletteTriangleCount > 0
+                          ? `${mappingDiagnosticTriangleCount.toLocaleString()} / ${paletteTriangleCount.toLocaleString()} ${t.trianglesShort} · ${((mappingDiagnosticTriangleCount / paletteTriangleCount) * 100).toFixed(2)}%`
+                          : t.mappingDiagnosticsNotApplicable}
+                      </b>
+                      <span>{t.mappingDiagnosticsAssignment}</span>
+                      <b>
+                        {selectedMappingDiagnostic.assignment.kind === "physical"
+                          ? `E${selectedMappingDiagnostic.assignment.extruder}`
+                          : `VE${selectedMappingDiagnostic.assignment.virtualId}`}
+                      </b>
+                      <span>{t.mappingDiagnosticsRecipe}</span>
+                      <b>
+                        {selectedMappingDiagnostic.recipe
+                          .map(
+                            (component) =>
+                              `E${component.extruder} ${(component.ratio * 100).toFixed(1)}%`,
+                          )
+                          .join(" + ")}
+                      </b>
+                      <span>{t.mappingDiagnosticsFdmPrediction}</span>
+                      <b>
+                        {rgbToHex(selectedMappingDiagnostic.predictedRgb)} · RGB {selectedMappingDiagnostic.predictedRgb.join(", ")}
+                      </b>
+                      <span>{t.mappingDiagnosticsPredictedLab}</span>
+                      <b>
+                        L* {selectedMappingDiagnostic.predictedLab.L.toFixed(1)} · a* {selectedMappingDiagnostic.predictedLab.a.toFixed(1)} · b* {selectedMappingDiagnostic.predictedLab.b.toFixed(1)}
+                      </b>
+                      <span>{t.mappingDiagnosticsDeltaE}</span>
+                      <b>{selectedMappingDiagnostic.deltaE.toFixed(2)}</b>
+                      <span>{t.mappingDiagnosticsHueShift}</span>
+                      <b>
+                        {selectedMappingDiagnostic.hueShiftDegrees === null
+                          ? t.mappingDiagnosticsNotApplicable
+                          : `${selectedMappingDiagnostic.hueShiftDegrees >= 0 ? "+" : ""}${selectedMappingDiagnostic.hueShiftDegrees.toFixed(1)}°`}
+                      </b>
+                      <span>{t.mappingDiagnosticsLightnessShift}</span>
+                      <b>
+                        {selectedMappingDiagnostic.lightnessShift >= 0 ? "+" : ""}{selectedMappingDiagnostic.lightnessShift.toFixed(1)} L*
+                      </b>
+                    </div>
+                  )}
+                  <p className="muted small-note">
+                    {t.mappingDiagnosticsAutomaticNote}
+                  </p>
+                </details>
 
                 <div
                   className="virtual-plan-box"
@@ -5125,7 +5720,7 @@ export default function App({
                         </div>
                         <PaletteBlockMap
                           entries={effectiveColourBlockEntries}
-                          onToggle={toggleAssignmentSelection}
+                          onToggle={handleMappingDiagnosticAssignmentPick}
                           emptyLabel={t.noLayerSequencePlan}
                         />
                         <div className="virtual-edit-actions stacked">
@@ -6350,10 +6945,48 @@ export default function App({
                     </>
                   )}
                 </div>
+                <div className="file-summary full export-filament-list">
+                  <b>{t.filamentList}</b>
+                  {filamentListName ? (
+                    <>
+                      <span>
+                        {safeFileDisplayName(filamentListName, "filaments.txt")}
+                      </span>
+                      <span>
+                        {loadedFilaments.length} {t.parsedFilaments}
+                      </span>
+                    </>
+                  ) : (
+                    <span>{t.noFilamentListLoaded}</span>
+                  )}
+                </div>
 
                 <div className="section-subtitle spaced">
                   {t.geometryAndBed}
                 </div>
+                {model && (
+                  <div className="file-summary full export-object-structure">
+                    <b>{t.exportObjectStructure}</b>
+                    <span>
+                      {model.parts.length <= 1
+                        ? t.exportSingleObject
+                        : `${model.parts.length} ${t.exportSeparateObjects}`}
+                    </span>
+                    {model.parts.length > 1 && (
+                      <span>{t.exportRelativePositionsPreserved}</span>
+                    )}
+                    {model.parts.length > 0 && (
+                      <details className="export-object-details">
+                        <summary>{t.exportObjectNames}</summary>
+                        <ul>
+                          {model.parts.map((part) => (
+                            <li key={part.id}>{part.name}</li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
+                  </div>
+                )}
                 <label className="inline-row" title={t.tipExportCoordinateMode}>
                   <HelpLabel title={t.tipExportCoordinateMode}>
                     {t.coordinateMode}
@@ -6383,12 +7016,15 @@ export default function App({
                   <HelpLabel title={t.tipExportTargetHeight}>
                     {t.targetHeight}
                   </HelpLabel>
-                  <input
-                    type="text"
-                    placeholder={t.optional}
-                    value={exportTargetHeight}
-                    onChange={(e) => setExportTargetHeight(e.target.value)}
-                  />
+                  <span className="measurement-input">
+                    <input
+                      type="text"
+                      placeholder={t.optional}
+                      value={exportTargetHeight}
+                      onChange={(e) => setExportTargetHeight(e.target.value)}
+                    />
+                    <span>mm</span>
+                  </span>
                 </label>
                 <label className="inline-check" title={t.tipExportPutOnBed}>
                   <input
@@ -6461,6 +7097,33 @@ export default function App({
                     }
                   />
                 </label>
+
+                {model && (
+                  <div className="file-summary full export-summary">
+                    <b>{t.exportSummary}</b>
+                    <span>
+                      {model.parts.length <= 1
+                        ? t.exportSingleObject
+                        : `${model.parts.length} ${t.exportSeparateObjects}`}
+                      {" · "}
+                      {currentPhysicalSlots.length}{" "}
+                      {t.physicalExtruders.toLowerCase()}
+                      {" · "}
+                      {virtualExtruderPlan.virtualBlends.length}{" "}
+                      {t.virtualExtrudersShort}
+                    </span>
+                    <span>
+                      {templateInfo
+                        ? `${t.sourceTemplate}: ${safeFileDisplayName(templateInfo.fileName, "template.3mf")}`
+                        : t.noTemplateLoaded}
+                    </span>
+                    <span>
+                      {filamentListName
+                        ? `${t.filamentList}: ${safeFileDisplayName(filamentListName, "filaments.txt")}`
+                        : t.noFilamentListLoaded}
+                    </span>
+                  </div>
+                )}
 
                 <button
                   className="export-main-button"
@@ -6884,6 +7547,16 @@ export default function App({
                           palette={palette}
                           effectivePaletteRgbByIndex={effectivePaletteRgbByIndex}
                           accentProtection={appliedAccentProtection}
+                          selectedPaletteIndices={
+                            activeTab === "palette"
+                              ? mappingDiagnosticPaletteIndices
+                              : null
+                          }
+                          onPalettePick={
+                            activeTab === "palette"
+                              ? handleMappingDiagnosticPalettePick
+                              : undefined
+                          }
                           view={view}
                           background={resolvedPreviewBackground}
                           displayMode={previewDisplayMode}
@@ -6918,6 +7591,16 @@ export default function App({
                           palette={palette}
                           effectivePaletteRgbByIndex={effectivePaletteRgbByIndex}
                           accentProtection={appliedAccentProtection}
+                          selectedPaletteIndices={
+                            activeTab === "palette"
+                              ? mappingDiagnosticPaletteIndices
+                              : null
+                          }
+                          onPalettePick={
+                            activeTab === "palette"
+                              ? handleMappingDiagnosticPalettePick
+                              : undefined
+                          }
                           view={view}
                           background={resolvedPreviewBackground}
                           displayMode={previewDisplayMode}
@@ -6948,6 +7631,16 @@ export default function App({
                       palette={palette}
                       effectivePaletteRgbByIndex={effectivePaletteRgbByIndex}
                       accentProtection={appliedAccentProtection}
+                      selectedPaletteIndices={
+                        activeTab === "palette"
+                          ? mappingDiagnosticPaletteIndices
+                          : null
+                      }
+                      onPalettePick={
+                        activeTab === "palette"
+                          ? handleMappingDiagnosticPalettePick
+                          : undefined
+                      }
                       view={view}
                       background={resolvedPreviewBackground}
                       displayMode={previewDisplayMode}

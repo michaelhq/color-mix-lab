@@ -21,7 +21,26 @@ const en: Dict = {
   loadSettings: "Load project",
   objFile: "OBJ file with vertex colours",
   chooseFile: "Choose file",
+  replaceObjFile: "Replace OBJ…",
+  loaded: "Loaded",
+  loadedFromTextureBaking: "Loaded from Texture Baking",
+  selectedReplacement: "Selected replacement",
+  clickToReplace: "Click to replace",
+  applySelectedFiles: "Apply selected replacements",
+  clearPendingSelection: "Clear pending selection",
+  handoffStatusTitle: "Texture Baking handoff",
+  handoffMergedObject: "merged object received",
+  handoffObjectsReceived: "objects received",
+  handoffSourceParts: "source parts selected",
+  progressHandoffTitle: "Loading model from Texture Baking",
+  progressHandoffReceive: "Receive baked OBJ handoff",
+  progressHandoffParse: "Read and parse OBJ geometry",
+  progressHandoffParts: "Restore model parts",
+  progressHandoffStats: "Prepare model statistics",
+  progressHandoffPreview: "Prepare palette and preview",
+  progressHandoffReady: "Ready",
   modelStats: "Model statistics",
+  modelParts: "Model parts",
   modelName: "Model name",
   vertices: "Vertices",
   triangles: "Triangles",
@@ -57,7 +76,7 @@ const en: Dict = {
   maxVirtualMixComponents2: "2 colours",
   maxVirtualMixComponents3: "3 colours",
   blendStepPercent: "Mixing recipe resolution",
-  accentProtection: "Accent colour preservation",
+  accentProtection: "Target-palette accent preservation",
   accentProtectionOff: "Off",
   accentProtectionBalanced: "Balanced",
   accentProtectionStrong: "Strong",
@@ -74,6 +93,24 @@ const en: Dict = {
   mappingWarmNeutral: "Warm/neutral-preserving",
   mappingHuePreserving: "Hue-preserving",
   mappingAccentPreserving: "Accent-preserving",
+  mappingDiagnostics: "Mapping diagnostics",
+  mappingDiagnosticsSelect: "click to inspect and highlight",
+  mappingDiagnosticsHint:
+    "Click a reduced target-palette colour, an effective virtual/direct assignment, or either model preview to inspect it. A virtual-extruder selection highlights all target triangles assigned to that VE in both previews; click again or click empty preview space to clear.",
+  mappingDiagnosticsTargetColours: "Selected target colours",
+  mappingDiagnosticsTarget: "Target RGB",
+  mappingDiagnosticsTargetLab: "Target LAB",
+  mappingDiagnosticsCoverage: "Model coverage",
+  mappingDiagnosticsAssignment: "Selected assignment",
+  mappingDiagnosticsRecipe: "Printable recipe",
+  mappingDiagnosticsFdmPrediction: "FDM-predicted RGB",
+  mappingDiagnosticsPredictedLab: "FDM-predicted LAB",
+  mappingDiagnosticsDeltaE: "Colour difference (ΔE)",
+  mappingDiagnosticsHueShift: "Hue shift",
+  mappingDiagnosticsLightnessShift: "Lightness shift",
+  mappingDiagnosticsNotApplicable: "n/a",
+  mappingDiagnosticsAutomaticNote:
+    "Shows the automatic mapping before any manual virtual-extruder edits. FDM-predicted values use the calibrated Prusa FDM mixer before preview-brightness adjustment.",
   virtualPreviewLightness: "Virtual preview brightness",
   virtualPreviewLightnessDarker: "Darker",
   virtualPreviewLightnessSlightlyDarker: "Slightly darker",
@@ -342,15 +379,15 @@ const en: Dict = {
   tipMaxVirtualMixComponents:
     "Limits virtual mixtures to at most two or three physical colours. A one-colour assignment is treated as a direct physical extruder, not as a virtual mixture.",
   tipBlendStepPercent:
-    "Controls which printable virtual-extruder recipes are generated. 5%, 10%, 20% and 25% modes use PrusaSlicer-compatible percentage grids plus the exact 33/33/33 three-colour recipe. Thirds only allows 33/67, 67/33 and 33/33/33. 50% + thirds allows 50/50 and 33/33/33.",
+    "Controls which printable virtual-extruder recipes are generated. Smaller percentage steps retain the recipes from coarser grids, so moving 25% → 20% → 10% → 5% cannot remove an already available coarse recipe. All percentage-grid modes also include the exact 33/33/33 three-colour recipe. Thirds only allows 33/67, 67/33 and 33/33/33. 50% + thirds allows 50/50 and 33/33/33.",
   tipAccentProtection:
-    "Controls how strongly small but visually distinct accent colours are preserved through palette reduction, palette matching, virtual-mix selection and print simulation. Off favours maximum reduction. Balanced is the default. Strong reserves more chromatic accents and merges larger similar areas more readily.",
+    "Controls only how strongly small but visually distinct colours are preserved while building and applying the reduced target palette. It does not change physical/virtual mixture scoring. Off favours maximum reduction; Balanced and Strong retain progressively more chromatic target accents.",
   tipVirtualMixPriority:
     "Controls the colour model and conservative hue/accent guards used while selecting printable virtual mixtures. The calibrated Prusa FDM mixer remains the base model instead of a simple RGB layer average.",
   tipColourDifferenceMetric:
     "Selects how colour differences are measured when matching reduced target colours to printable physical and virtual mixtures. CIE76 (ΔE76) measures the straight-line Euclidean distance between two colours in the 1976 CIELAB space, treating differences in L* (lightness), a* (green–red) and b* (blue–yellow) equally. It is a simple, transparent geometric distance, but equal numerical distances are not perceived equally across all colour regions. CIEDE2000 (ΔE00) compensates for this by perceptually weighting lightness, chroma and hue and is the default. The Prusa FDM mixing model itself is unchanged.",
   tipMappingStrategy:
-    "Controls how reduced target-palette colours are mapped to printable physical or virtual blends. Closest match minimizes individual colour error. Smooth transitions favours more continuous printable colours between neighbouring target tones. Warm/neutral-preserving penalizes green/olive drift for brown, orange, skin and rust tones and keeps low-saturation colours closer in lightness and neutrality. Hue-preserving penalizes wrong hue direction. Accent-preserving protects small saturated target colours during mapping.",
+    "Controls only how the already-built reduced target palette is mapped to printable physical or virtual blends. All strategies use the selected colour-difference metric and share coarse-grid safeguards against severe lightness loss and obvious warm-to-green/olive drift. Closest match otherwise stays nearest to the colour metric. Smooth transitions limits abrupt printable changes between neighbouring target tones. Warm/neutral-preserving adds stronger warm and neutral protection. Hue-preserving gives hue direction more weight. Accent-preserving protects small saturated target colours during mapping and is independent of Target-palette accent preservation.",
   tipVirtualPreviewLightness:
     "Adjusts only the displayed virtual-mix and print-simulation brightness. It does not change the reduced target palette, layer sequences or 3MF export. Darker modes now apply a stronger LAB lightness reduction because calibrated FDM prediction can appear too light in the browser preview.",
   tipPhysicalExtruders:
@@ -510,7 +547,7 @@ const en: Dict = {
   tipApplyPaletteSettings:
     "Rebuilds the reduced virtual-colour palette, effective layer sequences and WebGL preview from the current virtual-colour settings. This is applied manually to avoid blocking large models while editing.",
   tipResetPaletteSettings:
-    "Resets pending virtual-colour, assignment-mode, mixture-limit, recipe-resolution, accent-preservation, virtual-mix-priority and mapping-strategy settings to the last applied values.",
+    "Resets pending virtual-colour, assignment-mode, mixture-limit, recipe-resolution, target-palette accent-preservation, virtual-mix-priority and mapping-strategy settings to the last applied values.",
   export: "Export",
   exportIntro:
     "Generate a PrusaSlicer 3MF project from the prepared model, palette and physical colour setup. Template settings are used when a 3MF template is loaded; otherwise the app creates a minimal project.",
@@ -524,6 +561,12 @@ const en: Dict = {
   exportWithoutTemplateWarning:
     "No template is loaded. A minimal 3MF project can be generated, but for real slicing a configured PrusaSlicer template is recommended.",
   geometryAndBed: "Geometry and print bed",
+  exportObjectStructure: "3MF object structure",
+  exportSingleObject: "1 object",
+  exportSeparateObjects: "separate objects",
+  exportRelativePositionsPreserved: "Original relative positions are preserved.",
+  exportObjectNames: "Object names",
+  exportSummary: "Export summary",
   coordinateMode: "Coordinate mode",
   tipExportCoordinateMode:
     "auto detects Blender-style Y-up OBJ exports. keep preserves OBJ coordinates. blender-y-up forces X/Y/Z conversion for Blender OBJ exports. The WebGL preview uses the same orientation as the export.",
@@ -616,7 +659,7 @@ const en: Dict = {
   tipPaletteBlockmap:
     "Shows the reduced target palette as weighted blocks. Block size follows the number of model triangles. Colours are sorted by spectrum; neutral colours are grouped at the end.",
   tipEffectiveMixBlockmap:
-    "Shows the effective virtual and direct physical assignments as weighted blocks. Click blocks to select the corresponding virtual extruder or direct physical assignment for editing.",
+    "Shows the effective virtual and direct physical assignments as weighted blocks. Click a block to inspect and highlight all target triangles assigned to that virtual or physical extruder. Use the assignment-row checkboxes below for merge/assign editing.",
   paletteSortedBySpectrum: "sorted by spectrum, neutrals last",
   mergeSelectedTitle: "Merge selected virtual colours",
   mergeSelectedDescription:

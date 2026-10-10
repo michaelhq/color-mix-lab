@@ -6,6 +6,10 @@ export interface VertexColorObjExportResult {
   faceCount: number;
 }
 
+export interface VertexColorObjExportOptions {
+  preserveObjects?: boolean;
+}
+
 function safeObjName(name: string): string {
   return (name || 'baked_mesh').replace(/[^a-zA-Z0-9_.-]+/g, '_');
 }
@@ -77,6 +81,7 @@ export function exportBakedSceneToVertexColorObj(
   scene: THREE.Object3D,
   modelName = 'baked_model',
   exportScale = 1,
+  options: VertexColorObjExportOptions = {},
 ): VertexColorObjExportResult {
   scene.updateMatrixWorld(true);
 
@@ -100,7 +105,7 @@ export function exportBakedSceneToVertexColorObj(
     const index = geometry.index;
     const matrixWorld = object.matrixWorld.clone();
     const meshName = safeObjName(object.name || 'mesh');
-    faceLines.push(`g ${meshName}`);
+    faceLines.push(`${options.preserveObjects ? 'o' : 'g'} ${meshName}`);
 
     const triangleCount = index ? Math.floor(index.count / 3) : Math.floor(position.count / 3);
     for (let tri = 0; tri < triangleCount; tri += 1) {
@@ -164,6 +169,7 @@ export function exportBakedSceneToVertexColorObj(
   objLines.push('# VC2CM Texture Lab baked vertex-color OBJ');
   objLines.push('# Color Mix Lab coordinate mode: keep');
   objLines.push('# Handoff format for VertexColor2ColorMix. Colors are embedded as: v x y z r g b');
+  objLines.push('# VC2CM color_space sRGB');
   objLines.push('# Vertices are welded by position; colors at shared vertices are averaged.');
   objLines.push('# Exact baked face colors are embedded as: # VC2CM face_color r g b');
   objLines.push('# Coordinates are rotated from Texture Baking Y-up to printer Z-up, then rebased to local bounding-box center before scaling.');
@@ -172,7 +178,7 @@ export function exportBakedSceneToVertexColorObj(
   objLines.push(`# Exported printer-space bbox size: ${formatNumber(rawSize.x)} ${formatNumber(rawSize.y)} ${formatNumber(rawSize.z)}`);
   objLines.push(`# Local printer-space origin subtracted before export: ${formatNumber(rawCenter.x)} ${formatNumber(rawCenter.y)} ${formatNumber(rawCenter.z)}`);
   objLines.push(`# Export scale applied to vertex coordinates after rebasing: ${formatNumber(safeScale)}x`);
-  objLines.push(`o ${fileBase}`);
+  if (!options.preserveObjects) objLines.push(`o ${fileBase}`);
 
   for (const vertex of vertices) {
     const count = Math.max(vertex.colorCount, 1);

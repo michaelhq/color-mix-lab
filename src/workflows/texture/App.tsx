@@ -19,7 +19,12 @@ import {
 } from "./core/textureBake";
 
 type SurfaceDetailMode = "baseColorOnly" | "baseColorAndSurfaceMaps";
-type ReliefMode = "off" | "heightBumpOnly" | "aoRoughnessProxy";
+type TextureObjectHandling = "merge" | "separate";
+type ReliefMode =
+  | "off"
+  | "heightBumpOnly"
+  | "normalMapReconstruction"
+  | "aoRoughnessProxy";
 type TextureSizeMode =
   | "original"
   | "8192"
@@ -33,6 +38,13 @@ import { downloadBlob } from "./core/zipDownload";
 import { extractSupportedModelFilesFromZip } from "./core/readZip";
 import ModelPreview, { type CameraSyncState } from "./ui/ModelPreview";
 import type { PreviewDisplayMode } from "../common/previewRendering";
+import { EditableNumberInput } from "../common/EditableNumberInput";
+import {
+  discoverSceneModelParts,
+  markSceneModelPartRoot,
+  setSceneModelPartVisibility,
+  type SceneModelPart,
+} from "../common/modelParts";
 import {
   composeOrientationMatrices,
   IDENTITY_ORIENTATION_MATRIX,
@@ -69,6 +81,8 @@ type TranslationKey =
   | "displayModeTip"
   | "shaded"
   | "flatColour"
+  | "surfaceHighlights"
+  | "surfaceHighlightsTip"
   | "subdivision"
   | "export"
   | "advancedOptions"
@@ -169,6 +183,7 @@ type TranslationKey =
   | "handoffToVertexTip"
   | "handoffProgressTitle"
   | "handoffProgressStep"
+  | "handoffReleaseMemory"
   | "handoffPreparing"
   | "handoffPrepared"
   | "handoffFailed"
@@ -184,6 +199,7 @@ type TranslationKey =
   | "surfaceBaseOnlyOption"
   | "reliefOffOption"
   | "reliefHeightBumpOnlyOption"
+  | "reliefNormalMapOption"
   | "reliefAoRoughnessProxyOption"
   | "reliefSmoothingOffOption"
   | "reliefSmoothingLightOption"
@@ -249,9 +265,12 @@ const I18N: Record<UiLanguage, Record<TranslationKey, string>> = {
     preview: "Preview",
     display: "Display",
     displayModeTip:
-      "Shaded uses the shared Color Mix Lab lighting setup. Flat colour shows the model colours without lighting influence.",
+      "Shaded uses the same neutral material and Color Mix Lab lighting setup on both previews. Flat colour shows the model colours without lighting influence.",
     shaded: "Shaded",
     flatColour: "Flat colour",
+    surfaceHighlights: "Surface highlights",
+    surfaceHighlightsTip:
+      "Adds neutral specular highlights to both previews while keeping the same corrected base colours and Color Mix Lab lighting. This is a preview-only effect and does not change baking, relief, handoff, or export.",
     subdivision: "Subdivision",
     export: "Export",
     advancedOptions: "Advanced options",
@@ -298,13 +317,13 @@ const I18N: Record<UiLanguage, Record<TranslationKey, string>> = {
       "Scales OBJ coordinates for slicers. GLB/glTF often uses meters; PrusaSlicer usually interprets OBJ coordinates as millimeters.",
     surfaceDetailSources: "Detail sources for subdivision",
     surfaceDetailSourcesTip:
-      "The default uses Base Color only. Normal/AO/Roughness can be used as additional geometry indicators, but they are not baked as printable colors.",
+      "Base Color + Normal/AO/Roughness is enabled by default so surface maps can guide subdivision. These channels are not baked as printable colors.",
     reliefGeometry: "Relief geometry",
     reliefGeometryTip:
-      "Experimental: moves vertices using true Height/Bump maps or optionally AO/Roughness proxies. Default is Off.",
+      "Moves vertices using true Height/Bump maps, reconstructed Normal Maps, or optionally AO/Roughness proxies. Normal Map reconstruction is the default when a normal map is available.",
     reliefStrength: "Relief strength",
     reliefStrengthTip:
-      "Maximum displacement relative to the model diagonal. Start low, because high values can create artifacts.",
+      "Maximum displacement relative to the size of each mesh part. Start low, because high values can create artifacts.",
     reliefSmoothing: "Relief smoothing",
     reliefSmoothingTip:
       "Smooths relief heights before displacement. Stronger smoothing reduces hard artifacts but loses detail.",
@@ -320,7 +339,7 @@ const I18N: Record<UiLanguage, Record<TranslationKey, string>> = {
       "Exports the baked mesh as an OBJ with vertex colours in v x y z r g b format.",
     exporting: "Exporting…",
     standardNote:
-      "Default: Base Color, original texture resolution, slicer-safe detail subdivision, and no relief geometry. The export is a baked OBJ with vertex colors in v x y z r g b format.",
+      "Default: Base Color, original texture resolution, slicer-safe detail subdivision with Normal/AO/Roughness indicators, Normal Map relief at 0.5% with Strong smoothing, separate object handling, and no export scaling. The export is a baked OBJ with vertex colors in v x y z r g b format.",
     bakeSummary: "3. Baking summary",
     colorDistribution: "Baked color distribution",
     colorDistributionTip:
@@ -375,6 +394,7 @@ const I18N: Record<UiLanguage, Record<TranslationKey, string>> = {
       "Passes the baked vertex-colour OBJ directly to VertexColor 2 ColorMix without saving an intermediate file.",
     handoffProgressTitle: "Send baked OBJ",
     handoffProgressStep: "Send to VertexColor 2 ColorMix",
+    handoffReleaseMemory: "Release baked Texture Baking memory",
     handoffPreparing: "Preparing handoff…",
     handoffPrepared:
       "Handoff prepared: {faces} faces, {vertices} welded vertices. The baked OBJ was sent to VertexColor 2 ColorMix.",
@@ -391,7 +411,8 @@ const I18N: Record<UiLanguage, Record<TranslationKey, string>> = {
     surfaceBaseOnlyOption: "Base Color only",
     reliefOffOption: "Off",
     reliefHeightBumpOnlyOption: "Real height/bump/displacement map only",
-    reliefAoRoughnessProxyOption: "AO/Roughness as experimental proxy",
+    reliefNormalMapOption: "Reconstruct relief from Normal Map",
+    reliefAoRoughnessProxyOption: "AO/Roughness proxy",
     reliefSmoothingOffOption: "Off",
     reliefSmoothingLightOption: "Light",
     reliefSmoothingStrongOption: "Strong",
@@ -456,7 +477,7 @@ const I18N: Record<UiLanguage, Record<TranslationKey, string>> = {
     bakeColourCorrectionApplied:
       "These values are applied during the next texture bake, export and handoff.",
     defaultHints:
-      "Default: Base Color, original texture resolution, slicer-safe detail subdivision, and no relief geometry. Export is a baked OBJ with vertex colours in v x y z r g b format.",
+      "Default: Base Color, original texture resolution, slicer-safe detail subdivision with Normal/AO/Roughness indicators, Normal Map relief at 0.5% with Strong smoothing, separate object handling, and no export scaling. Export is a baked OBJ with vertex colours in v x y z r g b format.",
   },
 };
 
@@ -580,6 +601,8 @@ function reliefSourceLabel(source: ReliefSource): string {
       return "Height/Displacement Map";
     case "bumpMap":
       return "Bump Map";
+    case "normalMap":
+      return "Normal Map · reconstructed height";
     case "aoMap":
       return "AO map / occlusion channel";
     case "roughnessMap":
@@ -624,6 +647,23 @@ function waitForPaint(delayMs = 0): Promise<void> {
       else resolve();
     });
   });
+}
+
+function disposeGeneratedObjectResources(root: THREE.Object3D): void {
+  const geometries = new Set<THREE.BufferGeometry>();
+  const materials = new Set<THREE.Material>();
+  root.traverse((object) => {
+    if (!(object instanceof THREE.Mesh)) return;
+    if (object.geometry) geometries.add(object.geometry);
+    const meshMaterials = Array.isArray(object.material)
+      ? object.material
+      : [object.material];
+    for (const material of meshMaterials) {
+      if (material) materials.add(material);
+    }
+  });
+  for (const geometry of geometries) geometry.dispose();
+  for (const material of materials) material.dispose();
 }
 
 function estimateGeometryMemory(diagnostics: MeshDiagnostics | null): number {
@@ -888,6 +928,194 @@ function assignSceneMetadata(
   scene.updateMatrixWorld(true);
 }
 
+function objectContainsMesh(root: THREE.Object3D): boolean {
+  if (root instanceof THREE.Mesh) return true;
+  return root.children.some(objectContainsMesh);
+}
+
+function markObjPartRoots(root: THREE.Object3D): void {
+  const partRoots = root.children.filter(objectContainsMesh);
+  partRoots.forEach((partRoot) => markSceneModelPartRoot(partRoot, "obj-section"));
+}
+
+function markGltfPartRoots(gltf: GLTF): void {
+  type ParserAssociation = { nodes?: number };
+  type ParserInternals = {
+    associations?: { get: (object: THREE.Object3D) => ParserAssociation | undefined };
+    json?: { nodes?: Array<{ mesh?: number }> };
+  };
+
+  const parser = gltf.parser as unknown as ParserInternals;
+  const nodes = parser.json?.nodes ?? [];
+  gltf.scene.traverse((object) => {
+    const association = parser.associations?.get(object);
+    const nodeIndex = association?.nodes;
+    if (nodeIndex === undefined || !Number.isInteger(nodeIndex)) return;
+    if (nodes[nodeIndex]?.mesh === undefined) return;
+    markSceneModelPartRoot(object, "gltf-node");
+  });
+}
+
+
+type GltfTextureInfoJson = {
+  index: number;
+  texCoord?: number;
+  extensions?: Record<string, unknown>;
+};
+
+type LegacySpecGlossJson = {
+  diffuseFactor?: number[];
+  diffuseTexture?: GltfTextureInfoJson;
+  glossinessFactor?: number;
+};
+
+type GltfPbrMetallicRoughnessJson = {
+  baseColorFactor?: number[];
+  baseColorTexture?: GltfTextureInfoJson;
+  metallicFactor?: number;
+  roughnessFactor?: number;
+};
+
+type GltfMaterialJson = {
+  pbrMetallicRoughness?: GltfPbrMetallicRoughnessJson;
+  extensions?: Record<string, unknown>;
+};
+
+type GltfDocumentJson = {
+  materials?: GltfMaterialJson[];
+  extensionsUsed?: string[];
+  extensionsRequired?: string[];
+};
+
+const LEGACY_SPEC_GLOSS_EXTENSION = "KHR_materials_pbrSpecularGlossiness";
+const GLB_MAGIC = 0x46546c67;
+const GLB_JSON_CHUNK = 0x4e4f534a;
+
+function normaliseLegacySpecGlossMaterials(document: GltfDocumentJson): number {
+  let convertedCount = 0;
+
+  for (const material of document.materials ?? []) {
+    const extensions = material.extensions;
+    const legacy = extensions?.[LEGACY_SPEC_GLOSS_EXTENSION] as
+      | LegacySpecGlossJson
+      | undefined;
+    if (!legacy) continue;
+
+    const pbr = material.pbrMetallicRoughness ?? {};
+    if (!pbr.baseColorTexture && legacy.diffuseTexture) {
+      pbr.baseColorTexture = { ...legacy.diffuseTexture };
+    }
+    if (!pbr.baseColorFactor && legacy.diffuseFactor?.length) {
+      pbr.baseColorFactor = legacy.diffuseFactor.slice(0, 4);
+    }
+
+    // Specular/glossiness has no exact metallic/roughness equivalent. For the
+    // print-colour workflow the diffuse/base-colour channel is authoritative;
+    // these values provide a neutral dielectric preview without changing it.
+    if (pbr.metallicFactor === undefined) pbr.metallicFactor = 0;
+    if (
+      pbr.roughnessFactor === undefined &&
+      Number.isFinite(legacy.glossinessFactor)
+    ) {
+      const glossiness = Math.min(1, Math.max(0, legacy.glossinessFactor ?? 0));
+      pbr.roughnessFactor = 1 - glossiness;
+    }
+    material.pbrMetallicRoughness = pbr;
+
+    const remainingExtensions = { ...extensions };
+    delete remainingExtensions[LEGACY_SPEC_GLOSS_EXTENSION];
+    material.extensions = Object.keys(remainingExtensions).length
+      ? remainingExtensions
+      : undefined;
+    convertedCount += 1;
+  }
+
+  if (convertedCount > 0) {
+    document.extensionsUsed = document.extensionsUsed?.filter(
+      (name) => name !== LEGACY_SPEC_GLOSS_EXTENSION,
+    );
+    document.extensionsRequired = document.extensionsRequired?.filter(
+      (name) => name !== LEGACY_SPEC_GLOSS_EXTENSION,
+    );
+  }
+
+  return convertedCount;
+}
+
+function normaliseLegacyGltfText(text: string): {
+  payload: string;
+  convertedCount: number;
+} {
+  const document = JSON.parse(text) as GltfDocumentJson;
+  const convertedCount = normaliseLegacySpecGlossMaterials(document);
+  return {
+    payload: convertedCount > 0 ? JSON.stringify(document) : text,
+    convertedCount,
+  };
+}
+
+function normaliseLegacyGlb(buffer: ArrayBuffer): {
+  payload: ArrayBuffer;
+  convertedCount: number;
+} {
+  if (buffer.byteLength < 20) return { payload: buffer, convertedCount: 0 };
+
+  const header = new DataView(buffer);
+  if (header.getUint32(0, true) !== GLB_MAGIC || header.getUint32(4, true) !== 2) {
+    return { payload: buffer, convertedCount: 0 };
+  }
+
+  const source = new Uint8Array(buffer);
+  const chunks: Array<{ type: number; data: Uint8Array }> = [];
+  let offset = 12;
+  let convertedCount = 0;
+
+  while (offset + 8 <= buffer.byteLength) {
+    const chunkLength = header.getUint32(offset, true);
+    const chunkType = header.getUint32(offset + 4, true);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + chunkLength;
+    if (dataEnd > buffer.byteLength) return { payload: buffer, convertedCount: 0 };
+
+    let chunkData = source.slice(dataStart, dataEnd);
+    if (chunkType === GLB_JSON_CHUNK) {
+      const jsonText = new TextDecoder()
+        .decode(chunkData)
+        .replace(/[\u0000 ]+$/g, "");
+      const normalised = normaliseLegacyGltfText(jsonText);
+      convertedCount = normalised.convertedCount;
+      if (convertedCount > 0) {
+        const encoded = new TextEncoder().encode(normalised.payload);
+        const paddedLength = Math.ceil(encoded.byteLength / 4) * 4;
+        chunkData = new Uint8Array(paddedLength);
+        chunkData.fill(0x20);
+        chunkData.set(encoded);
+      }
+    }
+    chunks.push({ type: chunkType, data: chunkData });
+    offset = dataEnd;
+  }
+
+  if (convertedCount === 0) return { payload: buffer, convertedCount: 0 };
+
+  const totalLength = 12 + chunks.reduce((sum, chunk) => sum + 8 + chunk.data.byteLength, 0);
+  const output = new Uint8Array(totalLength);
+  const outputView = new DataView(output.buffer);
+  outputView.setUint32(0, GLB_MAGIC, true);
+  outputView.setUint32(4, 2, true);
+  outputView.setUint32(8, totalLength, true);
+
+  offset = 12;
+  for (const chunk of chunks) {
+    outputView.setUint32(offset, chunk.data.byteLength, true);
+    outputView.setUint32(offset + 4, chunk.type, true);
+    output.set(chunk.data, offset + 8);
+    offset += 8 + chunk.data.byteLength;
+  }
+
+  return { payload: output.buffer, convertedCount };
+}
+
 async function parseGltfAssetFiles(
   files: File[],
   file: File,
@@ -908,13 +1136,17 @@ async function parseGltfAssetFiles(
   });
 
   try {
-    const payload =
+    const sourcePayload =
       extension === "gltf" ? await file.text() : await file.arrayBuffer();
+    const normalised =
+      extension === "gltf"
+        ? normaliseLegacyGltfText(sourcePayload as string)
+        : normaliseLegacyGlb(sourcePayload as ArrayBuffer);
     const loader = new GLTFLoader(manager);
 
     const gltf = await new Promise<GLTF>((resolve, reject) => {
       loader.parse(
-        payload,
+        normalised.payload,
         "",
         (loaded) => resolve(loaded),
         (event) =>
@@ -931,6 +1163,7 @@ async function parseGltfAssetFiles(
       file.name,
       extension === "glb" ? "GLB" : "glTF + external files",
     );
+    markGltfPartRoots(gltf);
     await waitForTextureImages(gltf.scene);
     return gltf.scene;
   } finally {
@@ -1053,6 +1286,7 @@ async function parseObjAssetFiles(
       objFile.name,
       mtlFile ? "OBJ + MTL + textures" : "OBJ without MTL",
     );
+    markObjPartRoots(root);
     await waitForTextureImages(root);
     root.traverse((child) => {
       if (!(child instanceof THREE.Mesh)) return;
@@ -1289,14 +1523,13 @@ function TextureCorrectionSlider({
           />
         )}
       </span>
-      <input
+      <EditableNumberInput
         className="number"
-        type="number"
         min={min}
         max={max}
         step={step}
         value={value}
-        onChange={(event) => onChange(Number(event.currentTarget.value))}
+        onChange={onChange}
         title={tip}
       />
     </label>
@@ -1415,10 +1648,15 @@ type TexturePreviewBackground = "auto" | "light" | "dark";
 interface TextureBakeAppProps {
   onBakedObjHandoff?: (payload: {
     file: File;
-    obj: string;
     name: string;
     vertexCount: number;
     faceCount: number;
+    handoffInfo: {
+      objectHandling: "merge" | "separate";
+      sourcePartCount: number;
+      selectedPartCount: number;
+      exportedObjectCount: number;
+    };
   }) => void;
   shellTheme?: ShellTheme;
   reloadDataNonce?: number;
@@ -1478,6 +1716,7 @@ export default function App({
   const lastFilesRef = useRef<File[] | null>(null);
   const baseSceneRef = useRef<THREE.Object3D | null>(null);
   const baseDiagnosticsRef = useRef<MeshDiagnostics | null>(null);
+  const enabledPartIdsRef = useRef<Set<string>>(new Set());
   const orientationMatrixRef = useRef<OrientationMatrix>([
     ...IDENTITY_ORIENTATION_MATRIX,
   ]);
@@ -1493,6 +1732,7 @@ export default function App({
   const [previewView, setPreviewView] = useState<TexturePreviewView>("front");
   const [previewDisplayMode, setPreviewDisplayMode] =
     useState<PreviewDisplayMode>("shaded");
+  const [surfaceHighlights, setSurfaceHighlights] = useState(false);
   const [previewBackground, setPreviewBackground] =
     useState<TexturePreviewBackground>("auto");
   const [previewFitSignal, setPreviewFitSignal] = useState(0);
@@ -1510,9 +1750,9 @@ export default function App({
   const [appliedBakeColourCorrection, setAppliedBakeColourCorrection] =
     useState<TextureColourCorrection>(defaultTextureColourCorrection);
   const [reliefMode, setReliefMode] = useState<ReliefMode>("off");
-  const [reliefStrengthPercent, setReliefStrengthPercent] = useState(0.7);
+  const [reliefStrengthPercent, setReliefStrengthPercent] = useState(0.5);
   const [reliefSmoothing, setReliefSmoothing] =
-    useState<ReliefSmoothing>("light");
+    useState<ReliefSmoothing>("strong");
   const [subdivisionMode, setSubdivisionMode] =
     useState<SubdivisionMode>("adaptive");
   const [subdivisionQuality, setSubdivisionQuality] =
@@ -1522,6 +1762,10 @@ export default function App({
   const [cameraSyncState, setCameraSyncState] =
     useState<CameraSyncState | null>(null);
   const [scene, setScene] = useState<THREE.Object3D | null>(null);
+  const [modelParts, setModelParts] = useState<SceneModelPart[]>([]);
+  const [enabledPartIds, setEnabledPartIds] = useState<string[]>([]);
+  const [objectHandling, setObjectHandling] =
+    useState<TextureObjectHandling>("separate");
   const [bakedScene, setBakedScene] = useState<THREE.Object3D | null>(null);
   const [diagnostics, setDiagnostics] = useState<MeshDiagnostics | null>(null);
   const [bakeReport, setBakeReport] = useState<TextureBakeReport | null>(null);
@@ -1538,7 +1782,7 @@ export default function App({
   const [bakeBusy, setBakeBusy] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
   const [orientationBusy, setOrientationBusy] = useState(false);
-  const [exportScale, setExportScale] = useState(1000);
+  const [exportScale, setExportScale] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [bakeError, setBakeError] = useState<string | null>(null);
   const [progress, setProgress] = useState<ProgressOverlayState | null>(null);
@@ -1599,6 +1843,7 @@ export default function App({
       0, 0, 0, 1,
     );
     wrapper.applyMatrix4(transform);
+    setSceneModelPartVisibility(wrapper, enabledPartIdsRef.current);
     wrapper.updateMatrixWorld(true);
     return wrapper;
   }
@@ -1792,6 +2037,11 @@ export default function App({
           activeIndex: parseIndex + 2,
         });
         await waitForPaint(20);
+        const discoveredParts = discoverSceneModelParts(parsed.scene);
+        const allPartIds = discoveredParts.map((part) => part.id);
+        enabledPartIdsRef.current = new Set(allPartIds);
+        setModelParts(discoveredParts);
+        setEnabledPartIds(allPartIds);
         baseSceneRef.current = parsed.scene;
         orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
         const orientedScene = sceneWithOrientationMatrix(
@@ -1834,6 +2084,9 @@ export default function App({
           err instanceof Error ? err.message : "File could not be loaded.";
         baseSceneRef.current = null;
         baseDiagnosticsRef.current = null;
+        enabledPartIdsRef.current = new Set();
+        setModelParts([]);
+        setEnabledPartIds([]);
         setScene(null);
         setBakedScene(null);
         setDiagnostics(null);
@@ -1870,6 +2123,7 @@ export default function App({
       appliedBakeColourCorrection,
       pendingBakeColourCorrection,
       surfaceDetailMode,
+      objectHandling,
       reliefMode,
       reliefStrengthPercent,
       reliefSmoothing,
@@ -1880,6 +2134,7 @@ export default function App({
       exportScale,
       previewView,
       previewDisplayMode,
+      surfaceHighlights,
       previewBackground,
       wireframe,
       showAxes,
@@ -1934,13 +2189,23 @@ export default function App({
     )
       setSurfaceDetailMode(settings.surfaceDetailMode);
     if (
+      settings.objectHandling === "merge" ||
+      settings.objectHandling === "separate"
+    )
+      setObjectHandling(settings.objectHandling);
+    if (
       settings.reliefMode === "off" ||
       settings.reliefMode === "heightBumpOnly" ||
+      settings.reliefMode === "normalMapReconstruction" ||
       settings.reliefMode === "aoRoughnessProxy"
     )
       setReliefMode(settings.reliefMode);
     if (typeof settings.reliefStrengthPercent === "number")
-      setReliefStrengthPercent(settings.reliefStrengthPercent);
+      setReliefStrengthPercent(
+        Math.round(
+          Math.min(10, Math.max(0.5, settings.reliefStrengthPercent)) * 10,
+        ) / 10,
+      );
     if (
       settings.reliefSmoothing === "off" ||
       settings.reliefSmoothing === "light" ||
@@ -1982,6 +2247,8 @@ export default function App({
       settings.previewDisplayMode === "flat"
     )
       setPreviewDisplayMode(settings.previewDisplayMode);
+    if (typeof settings.surfaceHighlights === "boolean")
+      setSurfaceHighlights(settings.surfaceHighlights);
     if (
       settings.previewBackground === "auto" ||
       settings.previewBackground === "light" ||
@@ -2157,6 +2424,42 @@ export default function App({
     return Number(textureSizeMode);
   }, [textureSizeMode, customTextureMaxSize]);
 
+  const reliefAvailabilityNote = useMemo(() => {
+    if (!diagnostics || reliefMode === "off") return null;
+    if (reliefMode === "heightBumpOnly") {
+      if (diagnostics.displacementMapCount + diagnostics.bumpMapCount > 0)
+        return "Available: real bump/displacement source detected for this model.";
+      return "No bump or displacement map detected in the current model. This mode will not move geometry.";
+    }
+    if (reliefMode === "normalMapReconstruction") {
+      if (diagnostics.normalMapCount > 0)
+        return "Normal map detected. Relief is reconstructed from the shading normal map.";
+      return "No normal map detected in the current model. This mode will not move geometry.";
+    }
+    if (
+      diagnostics.aoMapCount +
+        diagnostics.roughnessMapCount +
+        diagnostics.metalnessMapCount >
+      0
+    )
+      return "AO/Roughness/Metalness proxy source detected. This is not true height data.";
+    return "No AO, roughness, or metalness texture detected in the current model. This proxy mode will not move geometry.";
+  }, [diagnostics, reliefMode]);
+
+  const reliefControlsActive = useMemo(() => {
+    if (!diagnostics || reliefMode === "off") return false;
+    if (reliefMode === "heightBumpOnly")
+      return diagnostics.displacementMapCount + diagnostics.bumpMapCount > 0;
+    if (reliefMode === "normalMapReconstruction")
+      return diagnostics.normalMapCount > 0;
+    return (
+      diagnostics.aoMapCount +
+        diagnostics.roughnessMapCount +
+        diagnostics.metalnessMapCount >
+      0
+    );
+  }, [diagnostics, reliefMode]);
+
   const runTextureBake = useCallback(async () => {
     if (!scene) return;
     const steps = [
@@ -2188,6 +2491,8 @@ export default function App({
         reliefStrengthPercent,
         reliefSmoothing,
         reliefUsePbrProxy: reliefMode === "aoRoughnessProxy",
+        reliefUseNormalMap: reliefMode === "normalMapReconstruction",
+        preserveModelParts: objectHandling === "separate",
         bakeColorMode,
         textureMaxSize: resolvedTextureMaxSize,
         colourCorrection: appliedBakeColourCorrection,
@@ -2241,6 +2546,7 @@ export default function App({
     reliefMode,
     reliefStrengthPercent,
     reliefSmoothing,
+    objectHandling,
     bakeColorMode,
     resolvedTextureMaxSize,
     appliedBakeColourCorrection,
@@ -2255,10 +2561,62 @@ export default function App({
     event.currentTarget.value = "";
   };
 
+  const applyTexturePartSelection = (nextIds: string[]) => {
+    const baseScene = baseSceneRef.current;
+    if (!baseScene) return;
+    enabledPartIdsRef.current = new Set(nextIds);
+    setEnabledPartIds(nextIds);
+    // The cached base diagnostics describe the previous selection. Force a
+    // fresh analysis for subsequent orientation changes.
+    baseDiagnosticsRef.current = null;
+    const orientedScene = sceneWithOrientationMatrix(
+      baseScene,
+      orientationMatrixRef.current,
+    );
+    const report = analyzeScene(
+      orientedScene,
+      fileInfo?.name ?? baseScene.name ?? "model",
+    );
+    setScene(orientedScene);
+    setDiagnostics(report);
+    setBakedScene(null);
+    setBakeReport(null);
+    setBakeError(null);
+    setCameraSyncState(null);
+    setPreviewFitSignal((value) => value + 1);
+    notifyStatus(
+      `Texture Baking: ${nextIds.length} of ${modelParts.length} model parts selected.`,
+    );
+  };
+
+  const toggleTexturePart = (partId: string, enabled: boolean) => {
+    const nextIds = enabled
+      ? [...enabledPartIds, partId]
+      : enabledPartIds.filter((id) => id !== partId);
+    applyTexturePartSelection(nextIds);
+  };
+
+  const changeObjectHandling = (next: TextureObjectHandling) => {
+    if (next === objectHandling) return;
+    setObjectHandling(next);
+    setBakedScene(null);
+    setBakeReport(null);
+    setBakeError(null);
+    setCameraSyncState(null);
+    notifyStatus(
+      next === "separate"
+        ? "Texture Baking: selected model parts will remain separate after baking."
+        : "Texture Baking: selected model parts will be merged after baking.",
+    );
+  };
+
   const clearModel = () => {
     lastFilesRef.current = null;
     baseSceneRef.current = null;
     baseDiagnosticsRef.current = null;
+    enabledPartIdsRef.current = new Set();
+    setModelParts([]);
+    setEnabledPartIds([]);
     setScene(null);
     setBakedScene(null);
     setDiagnostics(null);
@@ -2305,6 +2663,7 @@ export default function App({
         bakedScene,
         `${baseName}_baked`,
         exportScale,
+        { preserveObjects: objectHandling === "separate" },
       );
       setProgress({ title: t("progressExportTitle"), steps, activeIndex: 3 });
       const objName = `${baseName}_baked_vertexcolors.obj`;
@@ -2339,6 +2698,7 @@ export default function App({
     exportBusy,
     fileInfo?.name,
     exportScale,
+    objectHandling,
     language,
     notifyStatus,
     t,
@@ -2349,6 +2709,7 @@ export default function App({
     const steps = [
       t("progressPrepareGeometry"),
       t("progressWriteVertexColors"),
+      t("handoffReleaseMemory"),
       t("handoffProgressStep"),
     ];
     setExportBusy(true);
@@ -2356,34 +2717,66 @@ export default function App({
     setProgress({ title: t("handoffProgressTitle"), steps, activeIndex: 0 });
 
     try {
-      await new Promise((resolve) => window.setTimeout(resolve, 20));
+      await waitForPaint(20);
       setProgress({ title: t("handoffProgressTitle"), steps, activeIndex: 1 });
+      await waitForPaint(20);
       const baseName = (fileInfo?.name ?? "baked_model").replace(
         /\.[^.]+$/,
         "",
       );
-      const exported = exportBakedSceneToVertexColorObj(
-        bakedScene,
-        `${baseName}_baked`,
-        exportScale,
-      );
+      let { obj: objText, vertexCount, faceCount } =
+        exportBakedSceneToVertexColorObj(
+          bakedScene,
+          `${baseName}_baked`,
+          exportScale,
+          { preserveObjects: objectHandling === "separate" },
+        );
       const objName = `${baseName}_baked_vertexcolors.obj`;
-      const objFile = new File([exported.obj], objName, {
+      const objFile = new File([objText], objName, {
         type: "text/plain;charset=utf-8",
         lastModified: Date.now(),
       });
+      // The File owns the handoff payload now. Drop the large temporary OBJ
+      // string before VertexColor starts parsing so the browser may reclaim it.
+      objText = "";
+
+      let bakedMeshCount = 0;
+      bakedScene.traverse((object) => {
+        if (object instanceof THREE.Mesh) bakedMeshCount += 1;
+      });
+      const exportedObjectCount =
+        objectHandling === "separate" ? Math.max(1, bakedMeshCount) : 1;
+
       setProgress({ title: t("handoffProgressTitle"), steps, activeIndex: 2 });
+      notifyStatus("Texture Baking: releasing baked preview memory before handoff.");
+      // The baked OBJ has already been serialised into objFile. Release the large
+      // generated bake scene before VertexColor allocates its parsed model. Input
+      // files, source scene, settings and part selection remain intact.
+      setBakedScene(null);
+      setCameraSyncState(null);
+      await waitForPaint(80);
+      disposeGeneratedObjectResources(bakedScene);
+      bakedScene.clear();
+      await waitForPaint(40);
+
+      setProgress({ title: t("handoffProgressTitle"), steps, activeIndex: 3 });
+      await waitForPaint(20);
       onBakedObjHandoff({
         file: objFile,
-        obj: exported.obj,
         name: objName,
-        vertexCount: exported.vertexCount,
-        faceCount: exported.faceCount,
+        vertexCount,
+        faceCount,
+        handoffInfo: {
+          objectHandling,
+          sourcePartCount: modelParts.length,
+          selectedPartCount: enabledPartIds.length,
+          exportedObjectCount,
+        },
       });
       notifyStatus(
         t("handoffPrepared")
-          .replace("{faces}", formatNumber(exported.faceCount))
-          .replace("{vertices}", formatNumber(exported.vertexCount)),
+          .replace("{faces}", formatNumber(faceCount))
+          .replace("{vertices}", formatNumber(vertexCount)),
       );
       setProgress({
         title: t("handoffProgressTitle"),
@@ -2399,7 +2792,7 @@ export default function App({
       setProgress({
         title: t("handoffProgressTitle"),
         steps,
-        activeIndex: 2,
+        activeIndex: Math.max(0, steps.length - 1),
         error: message,
       });
       window.setTimeout(() => setProgress(null), 1600);
@@ -2411,7 +2804,9 @@ export default function App({
     exportBusy,
     exportScale,
     fileInfo?.name,
-    language,
+    objectHandling,
+    modelParts.length,
+    enabledPartIds.length,
     notifyStatus,
     onBakedObjHandoff,
     t,
@@ -2623,6 +3018,115 @@ export default function App({
                 </div>
               )}
 
+              {modelParts.length > 1 && (
+                <div className="model-parts-panel">
+                  <div className="model-parts-header">
+                    <div>
+                      <b>Model parts</b>
+                      <span className="muted">
+                        {enabledPartIds.length} of {modelParts.length} selected
+                      </span>
+                    </div>
+                    <div className="model-parts-actions">
+                      <button
+                        type="button"
+                        className="secondary compact"
+                        disabled={
+                          busy ||
+                          bakeBusy ||
+                          exportBusy ||
+                          orientationBusy ||
+                          enabledPartIds.length === modelParts.length
+                        }
+                        onClick={() =>
+                          applyTexturePartSelection(
+                            modelParts.map((part) => part.id),
+                          )
+                        }
+                      >
+                        Select all
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary compact"
+                        disabled={
+                          busy ||
+                          bakeBusy ||
+                          exportBusy ||
+                          orientationBusy ||
+                          enabledPartIds.length === 0
+                        }
+                        onClick={() => applyTexturePartSelection([])}
+                      >
+                        Select none
+                      </button>
+                    </div>
+                  </div>
+                  <div className="inline-row model-parts-handling">
+                    <InfoLabel tip="Controls whether selected source parts are merged after baking or kept as separate objects for OBJ export and the VertexColor handoff.">
+                      Object handling
+                    </InfoLabel>
+                    <select
+                      value={objectHandling}
+                      disabled={busy || bakeBusy || exportBusy || orientationBusy}
+                      onChange={(event) =>
+                        changeObjectHandling(
+                          event.currentTarget.value as TextureObjectHandling,
+                        )
+                      }
+                    >
+                      <option value="merge">Merge selected parts</option>
+                      <option value="separate">Keep selected parts separate</option>
+                    </select>
+                  </div>
+                  <div className="model-parts-list">
+                    {modelParts.map((part) => {
+                      const checked = enabledPartIds.includes(part.id);
+                      return (
+                        <label
+                          key={part.id}
+                          className="model-part-row"
+                          title="Selected parts are included in preview, diagnostics and texture baking."
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={
+                              busy || bakeBusy || exportBusy || orientationBusy
+                            }
+                            onChange={(event) =>
+                              toggleTexturePart(
+                                part.id,
+                                event.currentTarget.checked,
+                              )
+                            }
+                          />
+                          <span className="model-part-main">
+                            <b>{part.name}</b>
+                            <small>
+                              {formatNumber(part.triangleCount)} triangles ·{" "}
+                              {formatNumber(part.meshCount)} mesh
+                              {part.meshCount === 1 ? "" : "es"} ·{" "}
+                              {part.meshesWithUv === part.meshCount
+                                ? "UV"
+                                : part.meshesWithUv > 0
+                                  ? "partial UV"
+                                  : "no UV"}
+                            </small>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <p className="muted note">
+                    Deselected parts are excluded from the current preview,
+                    diagnostics and texture bake. {objectHandling === "separate"
+                      ? "Selected parts keep their object boundaries through baking, OBJ export and the VertexColor handoff."
+                      : "Selected parts are combined into one baked object."}
+                  </p>
+                </div>
+              )}
+
               {error && <div className="error-box">{error}</div>}
             </div>
 
@@ -2675,23 +3179,13 @@ export default function App({
                     <InfoLabel tip={t("fineRotationTip")}>
                       {t("rotationAngle")}
                     </InfoLabel>
-                    <input
-                      type="number"
+                    <EditableNumberInput
                       min={-180}
                       max={180}
                       step={1}
                       value={fineRotationAngle}
                       disabled={!baseSceneRef.current || busy || bakeBusy || exportBusy || orientationBusy}
-                      onChange={(event) =>
-                        setFineRotationAngle(
-                          Math.round(
-                            Math.max(
-                              -180,
-                              Math.min(180, Number(event.currentTarget.value) || 0),
-                            ),
-                          ),
-                        )
-                      }
+                      onChange={(value) => setFineRotationAngle(Math.round(value))}
                     />
                   </label>
                 </div>
@@ -3108,8 +3602,7 @@ export default function App({
                 </>
               )}
 
-              <details className="advanced-options">
-                <summary>{t("advancedOptions")}</summary>
+              <div className="advanced-options">
                 <div className="inline-row">
                   <InfoLabel tip={t("surfaceDetailSourcesTip")}>
                     {t("surfaceDetailSources")}
@@ -3145,32 +3638,59 @@ export default function App({
                     <option value="heightBumpOnly">
                       {t("reliefHeightBumpOnlyOption")}
                     </option>
+                    <option value="normalMapReconstruction">
+                      {t("reliefNormalMapOption")}
+                    </option>
                     <option value="aoRoughnessProxy">
                       {t("reliefAoRoughnessProxyOption")}
                     </option>
                   </select>
                 </div>
-                <div className="inline-row">
+                {reliefAvailabilityNote && (
+                  <p className="muted note compact-note">{reliefAvailabilityNote}</p>
+                )}
+                <div className={`slider-row relief-strength-row${reliefControlsActive ? "" : " relief-control-disabled"}`}>
                   <InfoLabel tip={t("reliefStrengthTip")}>
                     {t("reliefStrength")}
                   </InfoLabel>
-                  <select
-                    value={reliefStrengthPercent}
-                    onChange={(event) =>
-                      setReliefStrengthPercent(
-                        Number(event.currentTarget.value),
-                      )
-                    }
-                    disabled={reliefMode === "off"}
-                  >
-                    <option value={0.25}>0.25%</option>
-                    <option value={0.5}>0.5%</option>
-                    <option value={0.7}>0.7%</option>
-                    <option value={1}>1.0%</option>
-                    <option value={2}>2.0%</option>
-                  </select>
+                  <span className="slider-control">
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={10}
+                      step={0.1}
+                      value={reliefStrengthPercent}
+                      onChange={(event) =>
+                        setReliefStrengthPercent(
+                          Math.round(Number(event.currentTarget.value) * 10) / 10,
+                        )
+                      }
+                      disabled={!reliefControlsActive}
+                      title={t("reliefStrengthTip")}
+                    />
+                  </span>
+                  <span className="relief-strength-value">
+                    <input
+                      className="number"
+                      type="number"
+                      min={0.5}
+                      max={10}
+                      step={0.1}
+                      value={reliefStrengthPercent}
+                      onChange={(event) => {
+                        const next = Number(event.currentTarget.value);
+                        if (!Number.isFinite(next)) return;
+                        setReliefStrengthPercent(
+                          Math.round(Math.min(10, Math.max(0.5, next)) * 10) / 10,
+                        );
+                      }}
+                      disabled={!reliefControlsActive}
+                      aria-label={`${t("reliefStrength")} percent`}
+                    />
+                    <span aria-hidden="true">%</span>
+                  </span>
                 </div>
-                <div className="inline-row">
+                <div className={`inline-row${reliefControlsActive ? "" : " relief-control-disabled"}`}>
                   <InfoLabel tip={t("reliefSmoothingTip")}>
                     {t("reliefSmoothing")}
                   </InfoLabel>
@@ -3181,7 +3701,7 @@ export default function App({
                         event.currentTarget.value as ReliefSmoothing,
                       )
                     }
-                    disabled={reliefMode === "off"}
+                    disabled={!reliefControlsActive}
                   >
                     <option value="off">{t("reliefOffOption")}</option>
                     <option value="light">
@@ -3193,11 +3713,10 @@ export default function App({
                   </select>
                 </div>
                 <p className="muted note compact-note">
-                  Normal, AO, roughness and relief options are not active by
-                  default. They are experimental geometry or subdivision
-                  indicators only.
+                  Normal, AO and roughness maps can guide subdivision. Normal-map
+                  relief is reconstructed when a normal map is available.
                 </p>
-              </details>
+              </div>
 
               {diagnostics && diagnostics.triangleCount > triangleBudget && (
                 <ul className="warning-list compact">
@@ -3211,7 +3730,14 @@ export default function App({
                 <button
                   type="button"
                   onClick={runTextureBake}
-                  disabled={!scene || busy || bakeBusy || exportBusy || orientationBusy}
+                  disabled={
+                    !scene ||
+                    enabledPartIds.length === 0 ||
+                    busy ||
+                    bakeBusy ||
+                    exportBusy ||
+                    orientationBusy
+                  }
                   title={t("runBakeTip")}
                 >
                   {bakeBusy ? t("baking") : t("runBake")}
@@ -3745,6 +4271,21 @@ export default function App({
                       <option value="flat">{t("flatColour")}</option>
                     </select>
                   </label>
+                  <label title={t("surfaceHighlightsTip")}>
+                    <input
+                      type="checkbox"
+                      checked={surfaceHighlights}
+                      disabled={
+                        !hasAnyPreviewModel || previewDisplayMode === "flat"
+                      }
+                      onChange={(event) =>
+                        setSurfaceHighlights(event.currentTarget.checked)
+                      }
+                    />
+                    <InfoLabel tip={t("surfaceHighlightsTip")}>
+                      {t("surfaceHighlights")}
+                    </InfoLabel>
+                  </label>
                   <label title="Sets the preview background independently from the UI theme.">
                     <InfoLabel tip="Sets the preview background independently from the UI theme.">
                       Background
@@ -3856,6 +4397,7 @@ export default function App({
                     key={`original-${previewRebuildKey}`}
                     scene={scene}
                     displayMode={previewDisplayMode}
+                    surfaceHighlights={surfaceHighlights}
                     wireframe={wireframe}
                     showAxes={showAxes || showOrientationAxisGuide}
                     showAxisLabels={showOrientationAxisGuide}
@@ -3878,6 +4420,7 @@ export default function App({
                     key={`baked-${previewRebuildKey}`}
                     scene={bakedScene}
                     displayMode={previewDisplayMode}
+                    surfaceHighlights={surfaceHighlights}
                     wireframe={wireframe}
                     showAxes={showAxes || showOrientationAxisGuide}
                     showAxisLabels={showOrientationAxisGuide}

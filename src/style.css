@@ -68,6 +68,8 @@ button.secondary { background: #283746; color: #e8eef5; border: 1px solid #3a455
 .note { margin-top: 8px; }
 .slider-row { display: grid; grid-template-columns: 155px minmax(120px, 1fr) 62px; gap: 12px; align-items: center; margin: 10px 0; }
 .slider-row .help-label { min-width: 0; }
+.relief-strength-value { display: inline-grid; grid-template-columns: 70px auto; align-items: center; justify-content: end; gap: 5px; white-space: nowrap; min-width: 0; }
+.relief-strength-value .number { width: 70px; min-width: 0; }
 .number, .inline-row input { width: 70px; }
 input, select, textarea { border-radius: 8px; border: 1px solid #3a4551; background: #0f141a; color: #e8eef5; padding: 0.45rem 0.5rem; }
 input[type="range"] {
@@ -1275,6 +1277,15 @@ button.danger-outline {
   background: #3a8dde;
   transition: width 180ms ease;
 }
+.progress-detail {
+  margin: -6px 0 14px;
+  color: #aeb9c6;
+  font-size: 0.9rem;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+.app.theme-light .progress-detail,
+.theme-light .progress-detail { color: #5f6b7a; }
 .progress-steps {
   list-style: none;
   margin: 0;
@@ -1391,7 +1402,8 @@ button.danger-outline {
   transform: translateY(-1px);
   box-shadow: inset 0 0 0 1px rgba(0,0,0,0.2), 0 0 0 2px rgba(82,168,255,0.35);
 }
-.colour-block.selected {
+.colour-block.selected,
+.colour-block.diagnostic-selected {
   outline: 3px solid #52a8ff;
   outline-offset: 1px;
 }
@@ -1625,6 +1637,78 @@ button.secondary.compact {
   background: rgba(47, 125, 209, 0.08);
   border-color: rgba(47, 125, 209, 0.20);
   color: #253242;
+}
+
+.model-parts-panel {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid rgba(82, 168, 255, 0.20);
+  border-radius: 9px;
+  background: rgba(82, 168, 255, 0.05);
+}
+.model-parts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.model-parts-header > div {
+  display: grid;
+  gap: 2px;
+}
+.model-parts-header .model-parts-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.model-parts-list {
+  display: grid;
+  gap: 4px;
+}
+.model-part-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 7px 8px;
+  border-radius: 7px;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  background: rgba(255, 255, 255, 0.025);
+  cursor: pointer;
+}
+.model-part-row:hover {
+  border-color: rgba(82, 168, 255, 0.32);
+}
+.model-part-row input[type="checkbox"] {
+  margin-top: 2px;
+}
+.model-part-main {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.model-part-main b,
+.model-part-main small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-part-main small {
+  color: #93a0ad;
+  font-size: 0.79rem;
+}
+.cml-theme-light .model-parts-panel {
+  border-color: rgba(47, 125, 209, 0.20);
+  background: rgba(47, 125, 209, 0.04);
+}
+.cml-theme-light .model-part-row {
+  border-color: rgba(55, 65, 81, 0.12);
+  background: rgba(255, 255, 255, 0.45);
+}
+.cml-theme-light .model-part-main small {
+  color: #5d6875;
 }
 .cml-texture-pane .error-box {
   margin-top: 10px;
@@ -3139,18 +3223,30 @@ textarea { font: inherit; }
 .cml-texture-pane .texture-correction-row .number {
   width: 70px !important;
 }
+.cml-texture-pane .relief-strength-row {
+  grid-template-columns: 145px minmax(150px, 1fr) 84px !important;
+}
+.cml-texture-pane .relief-strength-row .slider-control {
+  min-width: 0 !important;
+  width: 100% !important;
+}
+.cml-texture-pane .relief-strength-row .relief-strength-value {
+  width: 84px !important;
+}
 
 /* v0.7.58: colour-correction sliders must respond to the actual settings-card
    width, not only to the browser viewport. This matters when the desktop
    settings pane is manually narrowed with the resizer. */
 .cml-vertex-pane .colour-correction-card,
-.cml-texture-pane .texture-correction-section {
+.cml-texture-pane .texture-correction-section,
+.cml-texture-pane .texture-bake-section {
   container-type: inline-size;
 }
 
 @container (max-width: 480px) {
   .cml-vertex-pane .colour-correction-card .slider-row,
-  .cml-texture-pane .texture-correction-row {
+  .cml-texture-pane .texture-correction-row,
+  .cml-texture-pane .relief-strength-row {
     grid-template-columns: minmax(0, 1fr) 70px !important;
     grid-template-areas:
       "label label"
@@ -3161,14 +3257,16 @@ textarea { font: inherit; }
   }
 
   .cml-vertex-pane .colour-correction-card .slider-row > .help-label,
-  .cml-texture-pane .texture-correction-row > .info-label {
+  .cml-texture-pane .texture-correction-row > .info-label,
+  .cml-texture-pane .relief-strength-row > .info-label {
     grid-area: label !important;
     min-width: 0 !important;
     white-space: normal !important;
   }
 
   .cml-vertex-pane .colour-correction-card .slider-row > .slider-control,
-  .cml-texture-pane .texture-correction-row > .slider-control {
+  .cml-texture-pane .texture-correction-row > .slider-control,
+  .cml-texture-pane .relief-strength-row > .slider-control {
     grid-area: slider !important;
     min-width: 0 !important;
     width: 100% !important;
@@ -3178,6 +3276,16 @@ textarea { font: inherit; }
   .cml-texture-pane .texture-correction-row > .number {
     grid-area: number !important;
     width: 70px !important;
+    min-width: 0 !important;
+  }
+
+  .cml-texture-pane .relief-strength-row {
+    grid-template-columns: minmax(0, 1fr) 84px !important;
+  }
+
+  .cml-texture-pane .relief-strength-row > .relief-strength-value {
+    grid-area: number !important;
+    width: 84px !important;
     min-width: 0 !important;
   }
 }
@@ -3449,4 +3557,132 @@ textarea { font: inherit; }
     grid-template-columns: minmax(0, 1fr) !important;
     height: auto !important;
   }
+}
+
+/* 0.8.16: make loaded VertexColor inputs and Texture Baking handoff state explicit. */
+.cml-vertex-pane .staged-file-status {
+  display: block;
+  min-width: 0;
+  color: #93a0ad;
+  font-size: 0.8rem;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cml-vertex-pane .handoff-load-status {
+  display: grid;
+  gap: 3px;
+  margin: 10px 0 2px;
+  padding: 10px 12px;
+  border: 1px solid rgba(82, 168, 255, 0.24);
+  border-radius: 9px;
+  background: rgba(82, 168, 255, 0.07);
+}
+
+.cml-vertex-pane .handoff-load-status b {
+  color: #eef5ff;
+}
+
+.cml-vertex-pane .handoff-load-status span {
+  color: #b9c7d6;
+  font-size: 0.84rem;
+  line-height: 1.35;
+}
+
+.cml-theme-light .cml-vertex-pane .staged-file-status {
+  color: #5d6875;
+}
+
+.cml-theme-light .cml-vertex-pane .handoff-load-status {
+  border-color: rgba(47, 125, 209, 0.22);
+  background: rgba(47, 125, 209, 0.06);
+}
+
+.cml-theme-light .cml-vertex-pane .handoff-load-status b {
+  color: #14202b;
+}
+
+.cml-theme-light .cml-vertex-pane .handoff-load-status span {
+  color: #4f5f70;
+}
+
+.cml-texture-pane .relief-control-disabled {
+  opacity: 0.48;
+}
+
+/* 0.8.26 palette-to-model mapping diagnostics */
+.three-preview-wrap.palette-pick-enabled canvas {
+  cursor: crosshair;
+}
+
+/* 0.8.25 targeted target-colour mapping diagnostics */
+.mapping-diagnostics {
+  margin: 10px 0 14px;
+  border-top: 1px solid #29313a;
+  padding-top: 9px;
+}
+.mapping-diagnostics summary {
+  cursor: pointer;
+  font-weight: 750;
+  color: #c7d5e5;
+}
+.mapping-diagnostics-grid {
+  display: grid;
+  grid-template-columns: minmax(128px, 0.7fr) minmax(0, 1.3fr);
+  gap: 6px 12px;
+  margin-top: 10px;
+  font-size: 0.84rem;
+  line-height: 1.35;
+}
+.mapping-diagnostics-grid > span {
+  color: #9fb0c2;
+}
+.mapping-diagnostics-grid > b {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 650;
+}
+.app.theme-light .mapping-diagnostics {
+  border-top-color: #d7dee8;
+}
+.app.theme-light .mapping-diagnostics summary {
+  color: #2c3a48;
+}
+.app.theme-light .mapping-diagnostics-grid > span {
+  color: #5d6875;
+}
+/* v0.8.33: export object-structure preview */
+.export-object-structure {
+  margin-bottom: 12px;
+}
+.export-object-details summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.export-object-details ul {
+  margin: 6px 0 0 18px;
+  padding: 0;
+}
+.export-object-details li {
+  margin: 2px 0;
+  overflow-wrap: anywhere;
+}
+/* v0.8.34: export summary, active filament list and target-height unit */
+.export-filament-list {
+  margin-top: 10px;
+}
+.cml-vertex-pane .export-card .measurement-input {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  width: max-content;
+}
+.cml-vertex-pane .export-card .measurement-input input {
+  width: 120px;
+}
+.export-summary {
+  margin-top: 14px;
 }

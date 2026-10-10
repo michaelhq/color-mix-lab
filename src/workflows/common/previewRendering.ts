@@ -85,6 +85,35 @@ type BaseColourMaterial = THREE.Material & {
   wireframe?: boolean;
 };
 
+export function makeNeutralShadedPreviewMaterial(
+  sourceMaterial: THREE.Material,
+  surfaceHighlights = false,
+): THREE.MeshStandardMaterial {
+  const source = sourceMaterial as BaseColourMaterial;
+  const material = new THREE.MeshStandardMaterial({
+    color: source.color?.clone() ?? new THREE.Color(0xffffff),
+    map: source.map ?? null,
+    alphaMap: source.alphaMap ?? null,
+    vertexColors: Boolean(source.vertexColors),
+    roughness: surfaceHighlights ? 0.38 : 0.78,
+    metalness: 0,
+    side: source.side,
+    transparent: source.transparent,
+    opacity: source.opacity,
+    alphaTest: source.alphaTest,
+    depthTest: source.depthTest,
+    depthWrite: source.depthWrite,
+  });
+  material.name = `${sourceMaterial.name || sourceMaterial.type} · neutral shaded${
+    surfaceHighlights ? " + highlights" : ""
+  }`;
+  material.blending = source.blending;
+  material.premultipliedAlpha = source.premultipliedAlpha;
+  material.dithering = source.dithering;
+  material.visible = source.visible;
+  return material;
+}
+
 export function makeFlatPreviewMaterial(
   sourceMaterial: THREE.Material,
 ): THREE.MeshBasicMaterial {

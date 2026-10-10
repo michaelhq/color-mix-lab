@@ -98,6 +98,8 @@ interface ThreePreviewProps {
   palette: PaletteEntry[];
   effectivePaletteRgbByIndex: Map<number, RGB>;
   accentProtection?: AccentProtectionMode;
+  selectedPaletteIndices?: number[] | null;
+  onPalettePick?: (paletteIndex: number | null) => void;
   view: View;
   background: PreviewBackground;
   displayMode: PreviewDisplayMode;
@@ -203,6 +205,28 @@ function nearestPaletteIndexCached(
   return next;
 }
 
+function targetPaletteEntryForTriangle(
+  sourceIndex: number,
+  model: MeshModel,
+  adjustedColors: RGB[],
+  palette: PaletteEntry[],
+  nearestCache: Map<number, number>,
+  accentProtection: AccentProtectionMode = "balanced",
+): PaletteEntry | null {
+  if (palette.length === 0) return null;
+  const source =
+    adjustedColors[sourceIndex] ||
+    model.triangleColors[sourceIndex] ||
+    ([180, 180, 180] as RGB);
+  const paletteArrayIndex = nearestPaletteIndexCached(
+    source,
+    palette,
+    nearestCache,
+    accentProtection,
+  );
+  return palette[paletteArrayIndex] ?? null;
+}
+
 function previewColourForTriangle(
   sourceIndex: number,
   model: MeshModel,
@@ -212,21 +236,47 @@ function previewColourForTriangle(
   effectivePaletteRgbByIndex: Map<number, RGB>,
   nearestCache: Map<number, number>,
   accentProtection: AccentProtectionMode = "balanced",
+  targetPaletteEntry?: PaletteEntry | null,
 ): RGB {
-  const source = adjustedColors[sourceIndex] ||
-    model.triangleColors[sourceIndex] || [180, 180, 180];
+  const source =
+    adjustedColors[sourceIndex] ||
+    model.triangleColors[sourceIndex] ||
+    ([180, 180, 180] as RGB);
   if (previewMode === "adjusted" || palette.length === 0) return source;
   const paletteEntry =
-    palette[
-      nearestPaletteIndexCached(source, palette, nearestCache, accentProtection)
-    ];
+    targetPaletteEntry ??
+    targetPaletteEntryForTriangle(
+      sourceIndex,
+      model,
+      adjustedColors,
+      palette,
+      nearestCache,
+      accentProtection,
+    );
   if (!paletteEntry) return source;
   if (previewMode === "print") {
-    return (
-      effectivePaletteRgbByIndex.get(paletteEntry.index) || paletteEntry.rgb
-    );
+    return effectivePaletteRgbByIndex.get(paletteEntry.index) || paletteEntry.rgb;
   }
   return paletteEntry.rgb;
+}
+
+function highlightedPreviewColour(
+  rgb: RGB,
+  selectedPaletteIndices: readonly number[] | null,
+  targetPaletteIndex: number | null,
+): RGB {
+  if (
+    !selectedPaletteIndices ||
+    selectedPaletteIndices.length === 0 ||
+    (targetPaletteIndex !== null &&
+      selectedPaletteIndices.includes(targetPaletteIndex))
+  )
+    return rgb;
+  return [
+    Math.round(rgb[0] * 0.18 + 10),
+    Math.round(rgb[1] * 0.18 + 10),
+    Math.round(rgb[2] * 0.18 + 10),
+  ];
 }
 
 function buildPreviewGeometryFromModel(
@@ -238,6 +288,7 @@ function buildPreviewGeometryFromModel(
   lodMode: WebglLodMode,
   maxPreviewTriangles: number,
   accentProtection: AccentProtectionMode = "balanced",
+  selectedPaletteIndices: readonly number[] | null = null,
 ): { geometry: THREE.BufferGeometry; triangleIndices: number[] } {
   const sourceIndices = previewTriangleIndices(
     model,
@@ -252,15 +303,29 @@ function buildPreviewGeometryFromModel(
 
   for (const sourceIndex of sourceIndices) {
     const tri = model.triangles[sourceIndex];
-    const rgb = previewColourForTriangle(
+    const targetPaletteEntry = targetPaletteEntryForTriangle(
       sourceIndex,
       model,
       adjustedColors,
-      previewMode,
       palette,
-      effectivePaletteRgbByIndex,
       nearestCache,
       accentProtection,
+    );
+    const targetPaletteIndex = targetPaletteEntry?.index ?? null;
+    const rgb = highlightedPreviewColour(
+      previewColourForTriangle(
+        sourceIndex,
+        model,
+        adjustedColors,
+        previewMode,
+        palette,
+        effectivePaletteRgbByIndex,
+        nearestCache,
+        accentProtection,
+        targetPaletteEntry,
+      ),
+      selectedPaletteIndices,
+      targetPaletteIndex,
     );
     const r = srgbChannelToLinearByte(rgb[0]);
     const g = srgbChannelToLinearByte(rgb[1]);
@@ -298,6 +363,7 @@ function writePreviewColourAttributeRange(
   start: number,
   end: number,
   accentProtection: AccentProtectionMode = "balanced",
+  selectedPaletteIndices: readonly number[] | null = null,
 ): void {
   const attribute = geometry.getAttribute("color") as
     | THREE.BufferAttribute
@@ -308,15 +374,29 @@ function writePreviewColourAttributeRange(
 
   for (let i = start; i < end; i++) {
     const sourceIndex = triangleIndices[i];
-    const rgb = previewColourForTriangle(
+    const targetPaletteEntry = targetPaletteEntryForTriangle(
       sourceIndex,
       model,
       adjustedColors,
-      previewMode,
       palette,
-      effectivePaletteRgbByIndex,
       nearestCache,
       accentProtection,
+    );
+    const targetPaletteIndex = targetPaletteEntry?.index ?? null;
+    const rgb = highlightedPreviewColour(
+      previewColourForTriangle(
+        sourceIndex,
+        model,
+        adjustedColors,
+        previewMode,
+        palette,
+        effectivePaletteRgbByIndex,
+        nearestCache,
+        accentProtection,
+        targetPaletteEntry,
+      ),
+      selectedPaletteIndices,
+      targetPaletteIndex,
     );
     const r = srgbChannelToLinearByte(rgb[0]);
     const g = srgbChannelToLinearByte(rgb[1]);
@@ -583,6 +663,8 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
       lodMode = "off",
       maxPreviewTriangles = DEFAULT_MAX_WEBGL_PREVIEW_TRIANGLES,
       accentProtection = "balanced",
+      selectedPaletteIndices = null,
+      onPalettePick,
       onBusyChange,
       syncId = "preview",
       syncEnabled = false,
@@ -594,6 +676,7 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
     ref,
   ) {
     const mountRef = useRef<HTMLDivElement | null>(null);
+    const modelRef = useRef<MeshModel | null>(model);
     const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
     const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
     const controlsRef = useRef<OrbitControls | null>(null);
@@ -616,7 +699,9 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
       palette,
       effectivePaletteRgbByIndex,
       accentProtection,
+      selectedPaletteIndices,
     });
+    const onPalettePickRef = useRef(onPalettePick);
     const colorUpdateTimerRef = useRef<number | null>(null);
     const materialUpdateTimerRef = useRef<number | null>(null);
     const colorUpdateRequestRef = useRef(0);
@@ -630,12 +715,20 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
     }
 
     useEffect(() => {
+      modelRef.current = model;
+    }, [model]);
+
+    useEffect(() => {
       syncEnabledRef.current = syncEnabled;
     }, [syncEnabled]);
 
     useEffect(() => {
       onSyncChangeRef.current = onSyncChange;
     }, [onSyncChange]);
+
+    useEffect(() => {
+      onPalettePickRef.current = onPalettePick;
+    }, [onPalettePick]);
 
     useEffect(() => {
       showAxisLabelsRef.current = showAxisLabels;
@@ -649,6 +742,7 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
         palette,
         effectivePaletteRgbByIndex,
         accentProtection,
+        selectedPaletteIndices,
       };
     }, [
       adjustedColors,
@@ -656,6 +750,7 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
       palette,
       effectivePaletteRgbByIndex,
       accentProtection,
+      selectedPaletteIndices,
     ]);
 
     useEffect(() => {
@@ -772,6 +867,76 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
       controls.screenSpacePanning = true;
       controlsRef.current = controls;
 
+      let palettePickPointerDown: {
+        x: number;
+        y: number;
+        button: number;
+      } | null = null;
+      const handlePalettePointerDown = (event: PointerEvent) => {
+        if (!onPalettePickRef.current || event.button !== 0) return;
+        palettePickPointerDown = {
+          x: event.clientX,
+          y: event.clientY,
+          button: event.button,
+        };
+      };
+      const handlePalettePointerUp = (event: PointerEvent) => {
+        const down = palettePickPointerDown;
+        palettePickPointerDown = null;
+        const onPick = onPalettePickRef.current;
+        if (!down || !onPick || down.button !== 0 || event.button !== 0) return;
+        if (Math.hypot(event.clientX - down.x, event.clientY - down.y) > 5)
+          return;
+
+        const currentMesh = meshRef.current;
+        const currentCamera = cameraRef.current;
+        if (!currentMesh || !currentCamera) return;
+        const rect = renderer.domElement.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        const pointer = new THREE.Vector2(
+          ((event.clientX - rect.left) / rect.width) * 2 - 1,
+          -((event.clientY - rect.top) / rect.height) * 2 + 1,
+        );
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(pointer, currentCamera);
+        const intersection = raycaster.intersectObject(currentMesh, false)[0];
+        if (
+          !intersection ||
+          intersection.faceIndex === undefined ||
+          intersection.faceIndex === null
+        ) {
+          onPick(null);
+          return;
+        }
+        const sourceIndex =
+          previewTriangleIndicesRef.current[intersection.faceIndex];
+        if (sourceIndex === undefined) return;
+        const currentModel = modelRef.current;
+        if (!currentModel) return;
+        const latest = latestPreviewDataRef.current;
+        const paletteEntry = targetPaletteEntryForTriangle(
+          sourceIndex,
+          currentModel,
+          latest.adjustedColors,
+          latest.palette,
+          new Map<number, number>(),
+          latest.accentProtection,
+        );
+        onPick(paletteEntry?.index ?? null);
+      };
+      const handlePalettePointerCancel = () => {
+        palettePickPointerDown = null;
+      };
+      renderer.domElement.addEventListener(
+        "pointerdown",
+        handlePalettePointerDown,
+      );
+      renderer.domElement.addEventListener("pointerup", handlePalettePointerUp);
+      renderer.domElement.addEventListener(
+        "pointercancel",
+        handlePalettePointerCancel,
+      );
+
       const emitSyncState = () => {
         if (
           !syncEnabledRef.current ||
@@ -844,6 +1009,18 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
           pendingSyncEmitRef.current = null;
         }
         controls.removeEventListener("change", emitSyncState);
+        renderer.domElement.removeEventListener(
+          "pointerdown",
+          handlePalettePointerDown,
+        );
+        renderer.domElement.removeEventListener(
+          "pointerup",
+          handlePalettePointerUp,
+        );
+        renderer.domElement.removeEventListener(
+          "pointercancel",
+          handlePalettePointerCancel,
+        );
         if (colorUpdateTimerRef.current !== null)
           window.clearTimeout(colorUpdateTimerRef.current);
         if (materialUpdateTimerRef.current !== null)
@@ -935,6 +1112,7 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
             lodMode,
             maxPreviewTriangles,
             latest.accentProtection,
+            latest.selectedPaletteIndices,
           );
           if (cancelled || requestId !== requestIdRef.current) {
             geometry.dispose();
@@ -969,7 +1147,7 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
           setBusyState(false);
         }
       };
-    }, [model, lodMode, maxPreviewTriangles, accentProtection]);
+    }, [model, lodMode, maxPreviewTriangles]);
 
     useEffect(() => {
       latestPreviewDataRef.current = {
@@ -978,6 +1156,7 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
         palette,
         effectivePaletteRgbByIndex,
         accentProtection,
+        selectedPaletteIndices,
       };
       const mesh = meshRef.current;
       const geometry = geometryRef.current;
@@ -1015,6 +1194,7 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
             cursor,
             end,
             latestPreviewDataRef.current.accentProtection,
+            latestPreviewDataRef.current.selectedPaletteIndices,
           );
           cursor = end;
           if (cursor < triangleIndices.length) {
@@ -1051,6 +1231,8 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
       previewMode,
       palette,
       effectivePaletteRgbByIndex,
+      accentProtection,
+      selectedPaletteIndices,
       model,
     ]);
 
@@ -1110,7 +1292,11 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
     }, [showAxes, showAxisLabels, trianglesShown]);
 
     return (
-      <div className={`three-preview-wrap preview-bg-${background}`}>
+      <div
+        className={`three-preview-wrap preview-bg-${background}${
+          onPalettePick ? " palette-pick-enabled" : ""
+        }`}
+      >
         <div ref={mountRef} className="three-preview" />
         {AXIS_LABEL_DEFINITIONS.map((definition) => (
           <span
@@ -1131,6 +1317,11 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
             {trianglesShown.toLocaleString()} /{" "}
             {model.triangles.length.toLocaleString()} triangles ·{" "}
             {lodMode === "off" ? "full" : `LOD ${lodMode}`}
+            {selectedPaletteIndices && selectedPaletteIndices.length > 0
+              ? selectedPaletteIndices.length === 1
+                ? ` · target #${selectedPaletteIndices[0]}`
+                : ` · ${selectedPaletteIndices.length} targets`
+              : ""}
           </div>
         )}
       </div>

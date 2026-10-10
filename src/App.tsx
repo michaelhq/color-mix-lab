@@ -8,15 +8,22 @@ type ThemeMode = "system" | "light" | "dark";
 type ResolvedTheme = "light" | "dark";
 
 /** Payload passed from Texture Baking to VertexColor without writing a temporary file. */
+interface BakedObjHandoffInfo {
+  objectHandling: "merge" | "separate";
+  sourcePartCount: number;
+  selectedPartCount: number;
+  exportedObjectCount: number;
+}
+
 interface BakedObjHandoffPayload {
   file: File;
-  obj: string;
   name: string;
   vertexCount: number;
   faceCount: number;
+  handoffInfo: BakedObjHandoffInfo;
 }
 
-const APP_VERSION = "0.8.4";
+const APP_VERSION = "0.8.34";
 const THEME_STORAGE_KEY = "color-mix-lab-theme-mode";
 
 function getSystemTheme(): ResolvedTheme {
@@ -42,6 +49,7 @@ const globalHelp = {
 export default function App() {
   const [activeWorkflow, setActiveWorkflow] = useState<WorkflowId>("texture");
   const [handoffFile, setHandoffFile] = useState<File | null>(null);
+  const [handoffInfo, setHandoffInfo] = useState<BakedObjHandoffInfo | null>(null);
   const [handoffNonce, setHandoffNonce] = useState(0);
   const [vertexLoadFocusNonce, setVertexLoadFocusNonce] = useState(0);
   const [reloadDataNonce, setReloadDataNonce] = useState(0);
@@ -73,8 +81,11 @@ export default function App() {
   // Keep both workflows mounted so their local state survives tab changes; the
   // nonce values signal intentional data reloads and handoffs between them.
   const handleBakedObjHandoff = useCallback((payload: BakedObjHandoffPayload) => {
-    setGlobalStatus("Baked OBJ sent to VertexColor 2 ColorMix.");
+    setGlobalStatus(
+      `Baked OBJ sent to VertexColor 2 ColorMix · ${payload.handoffInfo.exportedObjectCount} ${payload.handoffInfo.exportedObjectCount === 1 ? "object" : "objects"}.`,
+    );
     setHandoffFile(payload.file);
+    setHandoffInfo(payload.handoffInfo);
     setHandoffNonce((value) => value + 1);
     setVertexLoadFocusNonce((value) => value + 1);
     setActiveWorkflow("vertex");
@@ -148,6 +159,7 @@ export default function App() {
         <div className="cml-workflow-pane cml-vertex-pane" style={{ display: activeWorkflow === "vertex" ? "block" : "none", height: "100%" }}>
           <VertexColorMixWorkflow
             incomingObjFile={handoffFile}
+            incomingObjHandoffInfo={handoffInfo}
             incomingObjNonce={handoffNonce}
             focusLoadTabNonce={vertexLoadFocusNonce}
             onIncomingObjConsumed={() => setHandoffFile(null)}
