@@ -765,7 +765,13 @@ export default function ModelPreview({
     controlsRef.current = controls;
 
     const emitSyncState = () => {
+      // An empty preview must never drive the shared camera. This matters when
+      // the baked preview is intentionally cleared (for example after changing
+      // Keep/Merge object handling): OrbitControls.update() also emits a change
+      // event for the empty preview's default camera, which would otherwise move
+      // the populated sibling preview away from its model.
       if (
+        !modelRootRef.current ||
         !syncEnabledRef.current ||
         !onSyncChangeRef.current ||
         applyingExternalSyncRef.current
@@ -777,6 +783,7 @@ export default function ModelPreview({
         const currentCamera = cameraRef.current;
         const currentControls = controlsRef.current;
         if (
+          !modelRootRef.current ||
           !currentCamera ||
           !currentControls ||
           !syncEnabledRef.current ||
