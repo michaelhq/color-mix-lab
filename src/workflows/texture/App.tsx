@@ -183,7 +183,6 @@ type TranslationKey =
   | "handoffToVertexTip"
   | "handoffProgressTitle"
   | "handoffProgressStep"
-  | "handoffReleaseMemory"
   | "handoffPreparing"
   | "handoffPrepared"
   | "handoffFailed"
@@ -394,7 +393,6 @@ const I18N: Record<UiLanguage, Record<TranslationKey, string>> = {
       "Passes the baked vertex-colour OBJ directly to VertexColor 2 ColorMix without saving an intermediate file.",
     handoffProgressTitle: "Send baked OBJ",
     handoffProgressStep: "Send to VertexColor 2 ColorMix",
-    handoffReleaseMemory: "Release baked Texture Baking memory",
     handoffPreparing: "Preparing handoff…",
     handoffPrepared:
       "Handoff prepared: {faces} faces, {vertices} welded vertices. The baked OBJ was sent to VertexColor 2 ColorMix.",
@@ -647,23 +645,6 @@ function waitForPaint(delayMs = 0): Promise<void> {
       else resolve();
     });
   });
-}
-
-function disposeGeneratedObjectResources(root: THREE.Object3D): void {
-  const geometries = new Set<THREE.BufferGeometry>();
-  const materials = new Set<THREE.Material>();
-  root.traverse((object) => {
-    if (!(object instanceof THREE.Mesh)) return;
-    if (object.geometry) geometries.add(object.geometry);
-    const meshMaterials = Array.isArray(object.material)
-      ? object.material
-      : [object.material];
-    for (const material of meshMaterials) {
-      if (material) materials.add(material);
-    }
-  });
-  for (const geometry of geometries) geometry.dispose();
-  for (const material of materials) material.dispose();
 }
 
 function estimateGeometryMemory(diagnostics: MeshDiagnostics | null): number {
@@ -2709,7 +2690,6 @@ export default function App({
     const steps = [
       t("progressPrepareGeometry"),
       t("progressWriteVertexColors"),
-      t("handoffReleaseMemory"),
       t("handoffProgressStep"),
     ];
     setExportBusy(true);
@@ -2747,19 +2727,11 @@ export default function App({
       const exportedObjectCount =
         objectHandling === "separate" ? Math.max(1, bakedMeshCount) : 1;
 
+      // Keep the baked scene alive across the workflow handoff. Both workflows
+      // remain mounted, so returning to Texture Baking can reuse the existing
+      // baked preview without forcing another bake. Only the temporary OBJ string
+      // above is released after it has been copied into the File payload.
       setProgress({ title: t("handoffProgressTitle"), steps, activeIndex: 2 });
-      notifyStatus("Texture Baking: releasing baked preview memory before handoff.");
-      // The baked OBJ has already been serialised into objFile. Release the large
-      // generated bake scene before VertexColor allocates its parsed model. Input
-      // files, source scene, settings and part selection remain intact.
-      setBakedScene(null);
-      setCameraSyncState(null);
-      await waitForPaint(80);
-      disposeGeneratedObjectResources(bakedScene);
-      bakedScene.clear();
-      await waitForPaint(40);
-
-      setProgress({ title: t("handoffProgressTitle"), steps, activeIndex: 3 });
       await waitForPaint(20);
       onBakedObjHandoff({
         file: objFile,

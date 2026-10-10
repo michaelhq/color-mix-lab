@@ -23,7 +23,7 @@ interface BakedObjHandoffPayload {
   handoffInfo: BakedObjHandoffInfo;
 }
 
-const APP_VERSION = "0.8.35";
+const APP_VERSION = "0.8.36";
 const THEME_STORAGE_KEY = "color-mix-lab-theme-mode";
 
 function getSystemTheme(): ResolvedTheme {
