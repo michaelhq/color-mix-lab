@@ -18,6 +18,7 @@ import type {
 
 export type ExportCoordinateMode = "auto" | "keep" | "blender-y-up";
 export type ExportBedSource = "template" | "custom";
+export type ExportObjectHandling = "merge" | "separate";
 
 export interface ExportPlacementOptions {
   coordinateMode: ExportCoordinateMode;
@@ -43,6 +44,7 @@ export interface Export3mfOptions {
   placement: ExportPlacementOptions;
   updateExtruderColour?: boolean;
   accentProtection?: AccentProtectionMode;
+  objectHandling?: ExportObjectHandling;
 }
 
 interface ExportVirtualDefinition {
@@ -626,8 +628,12 @@ interface ExportModelPart {
   triangles: Array<{ triangle: Tri; sourceTriangleIndex: number }>;
 }
 
-function buildExportModelParts(model: MeshModel): ExportModelPart[] {
+function buildExportModelParts(
+  model: MeshModel,
+  objectHandling: ExportObjectHandling = "separate",
+): ExportModelPart[] {
   if (
+    objectHandling === "merge" ||
     model.parts.length <= 1 ||
     model.trianglePartIndices.length !== model.triangles.length
   ) {
@@ -718,7 +724,10 @@ function buildModelXml(
     options.palette,
     options.accentProtection ?? "balanced",
   );
-  const exportParts = buildExportModelParts(model);
+  const exportParts = buildExportModelParts(
+    model,
+    options.objectHandling ?? "separate",
+  );
   const leafByPaletteIndex = new Map<number, string>();
   for (const paletteIndex of options.palette.map((p) => p.index)) {
     const paintCode = paletteToPaintCode.get(paletteIndex);
@@ -783,10 +792,11 @@ function buildModelConfig(
   model: MeshModel,
   outputFileName: string,
   defaultExtruder: number,
+  objectHandling: ExportObjectHandling = "separate",
 ): string {
   const title = titleFromFilename(outputFileName);
   const sourceFile = model.name || `${modelBaseName(outputFileName)}.obj`;
-  const exportParts = buildExportModelParts(model);
+  const exportParts = buildExportModelParts(model, objectHandling);
   const out: string[] = ['<?xml version="1.0" encoding="UTF-8"?>', "<config>"];
 
   for (const part of exportParts) {
@@ -1012,7 +1022,6 @@ const TEMPLATE_SLOT_EXTEND_KEYS = new Set<string>([
   "end_filament_gcode",
   "extruder_colour",
   "extruder_offset",
-  "extrusion_axis",
   "fan_always_on",
   "filament_abrasive",
   "filament_colour",
@@ -1170,9 +1179,16 @@ function extendListValue(
   fallback: string,
 ): string {
   const tokens = splitListValue(value, separator);
+  // A template that already contains enough slot values is authoritative.
+  // Do not truncate or normalise it just because Color Mix Lab currently uses
+  // fewer physical slots. Only append values when the requested slot count
+  // cannot otherwise be represented.
+  if (tokens.length >= targetCount) return value;
   const fill = tokens.length > 0 ? tokens[tokens.length - 1] : fallback;
-  while (tokens.length < targetCount) tokens.push(fill);
-  return tokens.slice(0, targetCount).join(separator);
+  const missing = Math.max(0, targetCount - tokens.length);
+  if (!value.trim())
+    return Array.from({ length: missing }, () => fill).join(separator);
+  return `${value}${separator}${Array.from({ length: missing }, () => fill).join(separator)}`;
 }
 
 function filamentFallback(key: string, separator: string): string {
@@ -1247,6 +1263,7 @@ function extendKnownSlotLine(
   if (!TEMPLATE_SLOT_EXTEND_KEYS.has(parsed.key)) return null;
   const separator = detectSlotSeparator(parsed);
   if (!separator) return null;
+  if (splitListValue(parsed.value, separator).length >= targetCount) return null;
   const fallback = filamentFallback(parsed.key, separator);
   return extendListValue(parsed.value, separator, targetCount, fallback);
 }
@@ -1271,9 +1288,10 @@ function setOrAppendConfigKeys(config: string, values: Map<string, string>): str
 
 /**
  * Updates only the PrusaSlicer project keys that are required for the selected
- * physical extruder count. Template filament names and filament base colours are
- * intentionally preserved; Color Mix Lab only updates the visible extruder slot
- * colours and the slot-count metadata needed by PrusaSlicer.
+ * physical extruder count. Template filament names, filament base colours and
+ * unrelated scalar settings are intentionally preserved; Color Mix Lab only
+ * updates the visible extruder slot colours, required slot-count metadata and
+ * per-slot lists that are too short for the selected physical slot count.
  */
 function updateSlic3rConfigForPhysicalSlots(
   config: string,
@@ -1291,12 +1309,12 @@ function updateSlic3rConfigForPhysicalSlots(
   values.set("num_extruders", String(targetCount));
   values.set("single_extruder_multi_material", "1");
   values.set("printer_technology", "FFF");
-  values.set("wipe_tower", "1");
 
   const parsedLines = config.split(/\r?\n/).flatMap((raw) => {
     const parsed = parseConfigLine(raw);
     return parsed ? [parsed] : [];
   });
+  const templateKeys = new Set(parsedLines.map((line) => line.key));
   const customWipeMatrix =
     parsedLines.find((line) => line.key === "wiping_volumes_use_custom_matrix")?.value.trim() === "1";
   let templateHasWipingMatrix = false;
@@ -1305,7 +1323,10 @@ function updateSlic3rConfigForPhysicalSlots(
     if (parsed.key === "wiping_volumes_matrix") {
       templateHasWipingMatrix = true;
       if (customWipeMatrix) {
-        values.set(parsed.key, extendWipingVolumesMatrix(parsed.value, targetCount));
+        const sourceCount = inferSquareSize(parseNumericList(parsed.value).length);
+        if (sourceCount !== targetCount) {
+          values.set(parsed.key, extendWipingVolumesMatrix(parsed.value, targetCount));
+        }
       }
       continue;
     }
@@ -1326,20 +1347,36 @@ function updateSlic3rConfigForPhysicalSlots(
   // Essential fallbacks for minimal or unusual templates.  For normal templates
   // these keys already exist and were extended above by repeating the last
   // native value, not by replacing user filament presets.
-  if (!values.has("filament_settings_id"))
+  if (
+    !templateKeys.has("filament_settings_id") &&
+    !values.has("filament_settings_id")
+  )
     values.set("filament_settings_id", repeatValue('"Generic PLA"', targetCount, ";"));
-  if (!values.has("filament_type"))
+  if (
+    !templateKeys.has("filament_type") &&
+    !values.has("filament_type")
+  )
     values.set("filament_type", repeatValue("PLA", targetCount, ";"));
-  if (!values.has("filament_colour"))
+  if (
+    !templateKeys.has("filament_colour") &&
+    !values.has("filament_colour")
+  )
     values.set("filament_colour", repeatValue("#FF8000", targetCount, ";"));
-  if (!values.has("filament_diameter"))
+  if (
+    !templateKeys.has("filament_diameter") &&
+    !values.has("filament_diameter")
+  )
     values.set("filament_diameter", repeatValue("1.75", targetCount, ","));
-  if (!values.has("nozzle_diameter"))
+  if (
+    !templateKeys.has("nozzle_diameter") &&
+    !values.has("nozzle_diameter")
+  )
     values.set("nozzle_diameter", repeatValue("0.4", targetCount, ","));
-  if (!values.has("extruder_offset"))
+  if (
+    !templateKeys.has("extruder_offset") &&
+    !values.has("extruder_offset")
+  )
     values.set("extruder_offset", repeatValue("0x0", targetCount, ","));
-  if (!values.has("extrusion_axis"))
-    values.set("extrusion_axis", repeatValue("E", targetCount, ","));
 
   return setOrAppendConfigKeys(config, values);
 }
@@ -1441,6 +1478,7 @@ export async function buildPrusa3mfBlob(
     options.model,
     fileName,
     options.placement.defaultExtruder,
+    options.objectHandling ?? "separate",
   );
   const fsJson = fullSpectrumJson(options.physicalSlots, virtuals);
 

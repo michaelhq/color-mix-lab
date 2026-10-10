@@ -41,6 +41,7 @@ import {
   buildPrusa3mfBlob,
   type ExportBedSource,
   type ExportCoordinateMode,
+  type ExportObjectHandling,
 } from "./core/export3mf";
 import {
   buildVirtualExtruderPlan,
@@ -1676,6 +1677,8 @@ export default function App({
     useState<VertexHandoffInfo | null>(null);
   const [modelParts, setModelParts] = useState<MeshPart[]>([]);
   const [enabledModelPartIds, setEnabledModelPartIds] = useState<string[]>([]);
+  const [objectHandling, setObjectHandling] =
+    useState<ExportObjectHandling>("separate");
   const [fineRotationAxis, setFineRotationAxis] =
     useState<ModelRotationAxis>("z");
   const [fineRotationAngle, setFineRotationAngle] = useState(0);
@@ -2433,6 +2436,7 @@ export default function App({
     baseModelRef.current = null;
     setModelParts([]);
     setEnabledModelPartIds([]);
+    setObjectHandling(handoffInfo?.objectHandling ?? "separate");
     orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
     // During a handoff, keep expensive palette/preview computations paused until
     // the parsed model and its part/statistics UI have been committed. This lets
@@ -2901,6 +2905,7 @@ export default function App({
       assignmentTargetExtruder,
       virtualPlanFilter,
       exportFileName,
+      objectHandling,
       exportCoordinateMode,
       exportScale,
       exportTargetHeight,
@@ -3318,6 +3323,11 @@ export default function App({
         loadedExportFileName.trim(),
       );
     }
+    setObjectHandling(
+      settings.objectHandling === "merge" || settings.objectHandling === "separate"
+        ? settings.objectHandling
+        : objectHandling,
+    );
     setExportCoordinateMode(
       settings.exportCoordinateMode === "keep" ||
         settings.exportCoordinateMode === "blender-y-up" ||
@@ -4046,6 +4056,7 @@ export default function App({
     baseModelRef.current = null;
     setModelParts([]);
     setEnabledModelPartIds([]);
+    setObjectHandling("separate");
     orientationMatrixRef.current = [...IDENTITY_ORIENTATION_MATRIX];
     setLargeModelComputationsDeferred(false);
     setThreePreviewRequested(false);
@@ -4686,6 +4697,7 @@ export default function App({
         },
         updateExtruderColour: true,
         accentProtection: appliedAccentProtection,
+        objectHandling,
       });
       showProgress("export", t.progressExportTitle, exportSteps, 3);
       await yieldToUi(20);
@@ -5123,6 +5135,25 @@ export default function App({
                           </button>
                         </div>
                       </div>
+                      <div className="inline-row model-parts-handling">
+                        <HelpLabel title={t.tipObjectHandling}>
+                          {t.objectHandling}
+                        </HelpLabel>
+                        <select
+                          value={objectHandling}
+                          disabled={globalBusy}
+                          onChange={(event) =>
+                            setObjectHandling(
+                              event.currentTarget.value as ExportObjectHandling,
+                            )
+                          }
+                        >
+                          <option value="merge">{t.mergeSelectedParts}</option>
+                          <option value="separate">
+                            {t.keepSelectedPartsSeparate}
+                          </option>
+                        </select>
+                      </div>
                       <div className="model-parts-list">
                         {modelParts.map((part) => {
                           const checked = enabledModelPartIds.includes(part.id);
@@ -5160,8 +5191,9 @@ export default function App({
                       </div>
                       <p className="muted note">
                         Deselected parts are excluded from the current palette,
-                        preview and export. Selected model parts are preserved as
-                        separate objects in the exported 3MF.
+                        preview and export. Object handling controls whether the
+                        selected parts are merged or kept as separate objects in
+                        the exported 3MF.
                       </p>
                     </div>
                   )}
@@ -6968,14 +7000,14 @@ export default function App({
                   <div className="file-summary full export-object-structure">
                     <b>{t.exportObjectStructure}</b>
                     <span>
-                      {model.parts.length <= 1
+                      {objectHandling === "merge" || model.parts.length <= 1
                         ? t.exportSingleObject
                         : `${model.parts.length} ${t.exportSeparateObjects}`}
                     </span>
-                    {model.parts.length > 1 && (
+                    {objectHandling === "separate" && model.parts.length > 1 && (
                       <span>{t.exportRelativePositionsPreserved}</span>
                     )}
-                    {model.parts.length > 0 && (
+                    {objectHandling === "separate" && model.parts.length > 0 && (
                       <details className="export-object-details">
                         <summary>{t.exportObjectNames}</summary>
                         <ul>
@@ -7102,7 +7134,7 @@ export default function App({
                   <div className="file-summary full export-summary">
                     <b>{t.exportSummary}</b>
                     <span>
-                      {model.parts.length <= 1
+                      {objectHandling === "merge" || model.parts.length <= 1
                         ? t.exportSingleObject
                         : `${model.parts.length} ${t.exportSeparateObjects}`}
                       {" · "}

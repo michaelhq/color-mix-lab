@@ -41,6 +41,11 @@ const en: Dict = {
   progressHandoffReady: "Ready",
   modelStats: "Model statistics",
   modelParts: "Model parts",
+  objectHandling: "Object handling",
+  mergeSelectedParts: "Merge selected parts",
+  keepSelectedPartsSeparate: "Keep selected parts separate",
+  tipObjectHandling:
+    "Controls whether the selected model parts are merged into one 3MF object or kept as separate PrusaSlicer objects during export. Palette calculation and colour mapping are unchanged.",
   modelName: "Model name",
   vertices: "Vertices",
   triangles: "Triangles",
@@ -557,7 +562,7 @@ const en: Dict = {
   tipExportFileName:
     "Name of the generated 3MF project file. The file is downloaded by the browser.",
   exportUsesTemplate:
-    "The export uses this template as source for PrusaSlicer project settings, wipe-tower information, thumbnail and bed size.",
+    "The export uses this template as source for PrusaSlicer project settings, wipe-tower information and bed size. Color Mix Lab generates a new thumbnail for the exported model.",
   exportWithoutTemplateWarning:
     "No template is loaded. A minimal 3MF project can be generated, but for real slicing a configured PrusaSlicer template is recommended.",
   geometryAndBed: "Geometry and print bed",
