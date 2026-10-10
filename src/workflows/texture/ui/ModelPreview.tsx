@@ -8,6 +8,7 @@ import {
   makeFlatPreviewMaterial,
   makeNeutralShadedPreviewMaterial,
   type PreviewDisplayMode,
+  type PreviewShadingDetailMode,
 } from "../../common/previewRendering";
 
 export interface CameraSyncState {
@@ -90,7 +91,7 @@ interface ModelPreviewProps {
   onSyncChange?: (state: CameraSyncState) => void;
   colourCorrection?: TextureColourCorrection | null;
   displayMode?: PreviewDisplayMode;
-  surfaceHighlights?: boolean;
+  shadingDetail?: PreviewShadingDetailMode;
 }
 
 
@@ -219,33 +220,41 @@ type PreviewMaterialSet = THREE.Material | THREE.Material[];
 
 interface PreviewMaterialVariant {
   mesh: THREE.Mesh;
-  shaded: PreviewMaterialSet;
-  highlighted: PreviewMaterialSet;
+  shaded: Record<PreviewShadingDetailMode, PreviewMaterialSet>;
   flat: PreviewMaterialSet;
 }
+
+const PREVIEW_SHADING_DETAIL_MODES: PreviewShadingDetailMode[] = [
+  "neutral",
+  "surface",
+  "surfaceMetalness",
+  "surfaceAo",
+  "surfaceMetalnessAo",
+];
 
 function buildPreviewMaterialVariants(
   root: THREE.Object3D,
 ): PreviewMaterialVariant[] {
-  const shadedMaterialCache = new Map<THREE.Material, THREE.Material>();
-  const highlightedMaterialCache = new Map<THREE.Material, THREE.Material>();
+  const shadedMaterialCaches = new Map<
+    PreviewShadingDetailMode,
+    Map<THREE.Material, THREE.Material>
+  >();
+  PREVIEW_SHADING_DETAIL_MODES.forEach((mode) =>
+    shadedMaterialCaches.set(mode, new Map()),
+  );
   const flatMaterialCache = new Map<THREE.Material, THREE.Material>();
   const variants: PreviewMaterialVariant[] = [];
 
-  const shadedMaterial = (material: THREE.Material): THREE.Material => {
-    const cached = shadedMaterialCache.get(material);
+  const shadedMaterial = (
+    material: THREE.Material,
+    mode: PreviewShadingDetailMode,
+  ): THREE.Material => {
+    const cache = shadedMaterialCaches.get(mode)!;
+    const cached = cache.get(material);
     if (cached) return cached;
-    const shaded = makeNeutralShadedPreviewMaterial(material);
-    shadedMaterialCache.set(material, shaded);
+    const shaded = makeNeutralShadedPreviewMaterial(material, mode);
+    cache.set(material, shaded);
     return shaded;
-  };
-
-  const highlightedMaterial = (material: THREE.Material): THREE.Material => {
-    const cached = highlightedMaterialCache.get(material);
-    if (cached) return cached;
-    const highlighted = makeNeutralShadedPreviewMaterial(material, true);
-    highlightedMaterialCache.set(material, highlighted);
-    return highlighted;
   };
 
   const flatMaterial = (material: THREE.Material): THREE.Material => {
@@ -259,16 +268,18 @@ function buildPreviewMaterialVariants(
   root.traverse((object) => {
     if (!(object instanceof THREE.Mesh)) return;
     const source = object.material;
-    const shaded = Array.isArray(source)
-      ? source.map(shadedMaterial)
-      : shadedMaterial(source);
-    const highlighted = Array.isArray(source)
-      ? source.map(highlightedMaterial)
-      : highlightedMaterial(source);
+    const shaded = Object.fromEntries(
+      PREVIEW_SHADING_DETAIL_MODES.map((mode) => [
+        mode,
+        Array.isArray(source)
+          ? source.map((material) => shadedMaterial(material, mode))
+          : shadedMaterial(source, mode),
+      ]),
+    ) as Record<PreviewShadingDetailMode, PreviewMaterialSet>;
     const flat = Array.isArray(source)
       ? source.map(flatMaterial)
       : flatMaterial(source);
-    variants.push({ mesh: object, shaded, highlighted, flat });
+    variants.push({ mesh: object, shaded, flat });
   });
 
   return variants;
@@ -277,15 +288,11 @@ function buildPreviewMaterialVariants(
 function applyDisplayMode(
   variants: PreviewMaterialVariant[],
   displayMode: PreviewDisplayMode,
-  surfaceHighlights: boolean,
+  shadingDetail: PreviewShadingDetailMode,
 ): void {
   for (const variant of variants) {
     variant.mesh.material =
-      displayMode === "flat"
-        ? variant.flat
-        : surfaceHighlights
-          ? variant.highlighted
-          : variant.shaded;
+      displayMode === "flat" ? variant.flat : variant.shaded[shadingDetail];
   }
 }
 
@@ -293,10 +300,11 @@ function disposePreviewMaterials(variants: PreviewMaterialVariant[]): void {
   const disposed = new Set<THREE.Material>();
   for (const variant of variants) {
     const materials = [
-      ...(Array.isArray(variant.shaded) ? variant.shaded : [variant.shaded]),
-      ...(Array.isArray(variant.highlighted)
-        ? variant.highlighted
-        : [variant.highlighted]),
+      ...PREVIEW_SHADING_DETAIL_MODES.flatMap((mode) =>
+        Array.isArray(variant.shaded[mode])
+          ? variant.shaded[mode]
+          : [variant.shaded[mode]],
+      ),
       ...(Array.isArray(variant.flat) ? variant.flat : [variant.flat]),
     ];
     for (const material of materials) {
@@ -658,7 +666,7 @@ export default function ModelPreview({
   onSyncChange,
   colourCorrection = null,
   displayMode = "shaded",
-  surfaceHighlights = false,
+  shadingDetail = "neutral",
 }: ModelPreviewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -673,7 +681,7 @@ export default function ModelPreview({
   const modelRootRef = useRef<THREE.Object3D | null>(null);
   const materialVariantsRef = useRef<PreviewMaterialVariant[]>([]);
   const displayModeRef = useRef<PreviewDisplayMode>(displayMode);
-  const surfaceHighlightsRef = useRef(surfaceHighlights);
+  const shadingDetailRef = useRef<PreviewShadingDetailMode>(shadingDetail);
   const axesRef = useRef<THREE.LineSegments | null>(null);
   const axisLabelRefs = useRef<AxisLabelRefs>({});
   const showAxisLabelsRef = useRef(showAxisLabels);
@@ -699,13 +707,13 @@ export default function ModelPreview({
 
   useEffect(() => {
     displayModeRef.current = displayMode;
-    surfaceHighlightsRef.current = surfaceHighlights;
+    shadingDetailRef.current = shadingDetail;
     applyDisplayMode(
       materialVariantsRef.current,
       displayMode,
-      surfaceHighlights,
+      shadingDetail,
     );
-  }, [displayMode, surfaceHighlights]);
+  }, [displayMode, shadingDetail]);
 
   useEffect(() => {
     const renderer = rendererRef.current;
@@ -819,7 +827,7 @@ export default function ModelPreview({
       applyDisplayMode(
         materialVariantsRef.current,
         displayModeRef.current,
-        surfaceHighlightsRef.current,
+        shadingDetailRef.current,
       );
       modelRootRef.current = modelRoot;
       threeScene.add(modelRoot);

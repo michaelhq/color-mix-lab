@@ -1,6 +1,12 @@
 import * as THREE from "three";
 
 export type PreviewDisplayMode = "shaded" | "flat";
+export type PreviewShadingDetailMode =
+  | "neutral"
+  | "surface"
+  | "surfaceMetalness"
+  | "surfaceAo"
+  | "surfaceMetalnessAo";
 export type PreviewCoordinateMode = "textureYUp" | "printerZUp";
 
 const SHADED_PREVIEW_AMBIENT_INTENSITY = 1.4;
@@ -83,20 +89,50 @@ type BaseColourMaterial = THREE.Material & {
   alphaMap?: THREE.Texture | null;
   vertexColors?: boolean;
   wireframe?: boolean;
+  roughness?: number;
+  roughnessMap?: THREE.Texture | null;
+  normalMap?: THREE.Texture | null;
+  normalMapType?: THREE.MeshStandardMaterial["normalMapType"];
+  normalScale?: THREE.Vector2;
+  bumpMap?: THREE.Texture | null;
+  bumpScale?: number;
+  metalness?: number;
+  metalnessMap?: THREE.Texture | null;
+  aoMap?: THREE.Texture | null;
+  aoMapIntensity?: number;
 };
 
 export function makeNeutralShadedPreviewMaterial(
   sourceMaterial: THREE.Material,
-  surfaceHighlights = false,
+  shadingDetail: PreviewShadingDetailMode = "neutral",
 ): THREE.MeshStandardMaterial {
   const source = sourceMaterial as BaseColourMaterial;
+  const surfaceDetail = shadingDetail !== "neutral";
+  const includeMetalness =
+    shadingDetail === "surfaceMetalness" ||
+    shadingDetail === "surfaceMetalnessAo";
+  const includeAo =
+    shadingDetail === "surfaceAo" ||
+    shadingDetail === "surfaceMetalnessAo";
+  const sourceRoughness = Number.isFinite(source.roughness)
+    ? Number(source.roughness)
+    : 0.38;
   const material = new THREE.MeshStandardMaterial({
     color: source.color?.clone() ?? new THREE.Color(0xffffff),
     map: source.map ?? null,
     alphaMap: source.alphaMap ?? null,
     vertexColors: Boolean(source.vertexColors),
-    roughness: surfaceHighlights ? 0.38 : 0.78,
-    metalness: 0,
+    roughness: surfaceDetail ? sourceRoughness : 0.78,
+    roughnessMap: surfaceDetail ? source.roughnessMap ?? null : null,
+    normalMap: surfaceDetail ? source.normalMap ?? null : null,
+    normalMapType: source.normalMapType,
+    normalScale: source.normalScale?.clone(),
+    bumpMap: surfaceDetail ? source.bumpMap ?? null : null,
+    bumpScale: surfaceDetail ? source.bumpScale ?? 1 : 1,
+    metalness: includeMetalness ? source.metalness ?? 0 : 0,
+    metalnessMap: includeMetalness ? source.metalnessMap ?? null : null,
+    aoMap: includeAo ? source.aoMap ?? null : null,
+    aoMapIntensity: includeAo ? source.aoMapIntensity ?? 1 : 1,
     side: source.side,
     transparent: source.transparent,
     opacity: source.opacity,
@@ -104,9 +140,7 @@ export function makeNeutralShadedPreviewMaterial(
     depthTest: source.depthTest,
     depthWrite: source.depthWrite,
   });
-  material.name = `${sourceMaterial.name || sourceMaterial.type} · neutral shaded${
-    surfaceHighlights ? " + highlights" : ""
-  }`;
+  material.name = `${sourceMaterial.name || sourceMaterial.type} · neutral shaded · ${shadingDetail}`;
   material.blending = source.blending;
   material.premultipliedAlpha = source.premultipliedAlpha;
   material.dithering = source.dithering;

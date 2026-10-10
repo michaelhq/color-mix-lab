@@ -37,7 +37,10 @@ import { exportBakedSceneToVertexColorObj } from "./core/exportObj";
 import { downloadBlob } from "./core/zipDownload";
 import { extractSupportedModelFilesFromZip } from "./core/readZip";
 import ModelPreview, { type CameraSyncState } from "./ui/ModelPreview";
-import type { PreviewDisplayMode } from "../common/previewRendering";
+import type {
+  PreviewDisplayMode,
+  PreviewShadingDetailMode,
+} from "../common/previewRendering";
 import { EditableNumberInput } from "../common/EditableNumberInput";
 import {
   discoverSceneModelParts,
@@ -81,8 +84,13 @@ type TranslationKey =
   | "displayModeTip"
   | "shaded"
   | "flatColour"
-  | "surfaceHighlights"
-  | "surfaceHighlightsTip"
+  | "shadingDetail"
+  | "shadingDetailTip"
+  | "shadingNeutral"
+  | "shadingSurface"
+  | "shadingSurfaceMetalness"
+  | "shadingSurfaceAo"
+  | "shadingSurfaceMetalnessAo"
   | "subdivision"
   | "export"
   | "advancedOptions"
@@ -267,9 +275,15 @@ const I18N: Record<UiLanguage, Record<TranslationKey, string>> = {
       "Shaded uses the same neutral material and Color Mix Lab lighting setup on both previews. Flat colour shows the model colours without lighting influence.",
     shaded: "Shaded",
     flatColour: "Flat colour",
-    surfaceHighlights: "Surface highlights",
-    surfaceHighlightsTip:
-      "Adds neutral specular highlights to both previews while keeping the same corrected base colours and Color Mix Lab lighting. This is a preview-only effect and does not change baking, relief, handoff, or export.",
+    shadingDetail: "Shading detail",
+    shadingDetailTip:
+      "Controls preview-only surface shading while keeping the corrected base colours. Surface detail adds source roughness plus normal/bump detail where available. Metalness and ambient occlusion are only offered when the selected model parts contain those channels. Baking, relief, handoff and export are unchanged.",
+    shadingNeutral: "Neutral",
+    shadingSurface: "Surface detail",
+    shadingSurfaceMetalness: "Surface detail + Metalness",
+    shadingSurfaceAo: "Surface detail + Ambient occlusion",
+    shadingSurfaceMetalnessAo:
+      "Surface detail + Metalness + Ambient occlusion",
     subdivision: "Subdivision",
     export: "Export",
     advancedOptions: "Advanced options",
@@ -1626,6 +1640,61 @@ type TexturePreviewView =
   | "bottom";
 type TexturePreviewBackground = "auto" | "light" | "dark";
 
+interface PreviewShadingChannels {
+  metalness: boolean;
+  ambientOcclusion: boolean;
+}
+
+type PreviewSurfaceMaterial = THREE.Material & {
+  metalness?: number;
+  metalnessMap?: THREE.Texture | null;
+  aoMap?: THREE.Texture | null;
+};
+
+function previewShadingChannelsForScene(
+  sourceScene: THREE.Object3D | null,
+): PreviewShadingChannels {
+  const result: PreviewShadingChannels = {
+    metalness: false,
+    ambientOcclusion: false,
+  };
+  if (!sourceScene) return result;
+
+  sourceScene.traverse((object) => {
+    if (!(object instanceof THREE.Mesh) || !object.visible) return;
+    const materials = Array.isArray(object.material)
+      ? object.material
+      : [object.material];
+    for (const rawMaterial of materials) {
+      if (!rawMaterial) continue;
+      const material = rawMaterial as PreviewSurfaceMaterial;
+      if (
+        material.metalnessMap ||
+        (typeof material.metalness === "number" && material.metalness > 1e-6)
+      )
+        result.metalness = true;
+      if (material.aoMap) result.ambientOcclusion = true;
+      if (result.metalness && result.ambientOcclusion) return;
+    }
+  });
+  return result;
+}
+
+function availablePreviewShadingDetail(
+  mode: PreviewShadingDetailMode,
+  channels: PreviewShadingChannels,
+): PreviewShadingDetailMode {
+  if (mode === "surfaceMetalnessAo") {
+    if (channels.metalness && channels.ambientOcclusion) return mode;
+    if (channels.metalness) return "surfaceMetalness";
+    if (channels.ambientOcclusion) return "surfaceAo";
+    return "surface";
+  }
+  if (mode === "surfaceMetalness" && !channels.metalness) return "surface";
+  if (mode === "surfaceAo" && !channels.ambientOcclusion) return "surface";
+  return mode;
+}
+
 interface TextureBakeAppProps {
   onBakedObjHandoff?: (payload: {
     file: File;
@@ -1713,7 +1782,8 @@ export default function App({
   const [previewView, setPreviewView] = useState<TexturePreviewView>("front");
   const [previewDisplayMode, setPreviewDisplayMode] =
     useState<PreviewDisplayMode>("shaded");
-  const [surfaceHighlights, setSurfaceHighlights] = useState(false);
+  const [previewShadingDetail, setPreviewShadingDetail] =
+    useState<PreviewShadingDetailMode>("neutral");
   const [previewBackground, setPreviewBackground] =
     useState<TexturePreviewBackground>("auto");
   const [previewFitSignal, setPreviewFitSignal] = useState(0);
@@ -2115,7 +2185,7 @@ export default function App({
       exportScale,
       previewView,
       previewDisplayMode,
-      surfaceHighlights,
+      previewShadingDetail,
       previewBackground,
       wireframe,
       showAxes,
@@ -2228,8 +2298,18 @@ export default function App({
       settings.previewDisplayMode === "flat"
     )
       setPreviewDisplayMode(settings.previewDisplayMode);
-    if (typeof settings.surfaceHighlights === "boolean")
-      setSurfaceHighlights(settings.surfaceHighlights);
+    if (
+      settings.previewShadingDetail === "neutral" ||
+      settings.previewShadingDetail === "surface" ||
+      settings.previewShadingDetail === "surfaceMetalness" ||
+      settings.previewShadingDetail === "surfaceAo" ||
+      settings.previewShadingDetail === "surfaceMetalnessAo"
+    ) {
+      setPreviewShadingDetail(settings.previewShadingDetail);
+    } else if (typeof settings.surfaceHighlights === "boolean") {
+      // Backward compatibility with Texture Baking project data from 0.8.30-0.8.36.
+      setPreviewShadingDetail(settings.surfaceHighlights ? "surface" : "neutral");
+    }
     if (
       settings.previewBackground === "auto" ||
       settings.previewBackground === "light" ||
@@ -2812,6 +2892,26 @@ export default function App({
   const previewDarkMode =
     previewBackground === "auto" ? darkMode : previewBackground === "dark";
   const hasAnyPreviewModel = Boolean(scene || bakedScene);
+  const previewShadingChannels = useMemo(
+    () => previewShadingChannelsForScene(scene),
+    [scene],
+  );
+  const effectivePreviewShadingDetail = useMemo(
+    () =>
+      scene
+        ? availablePreviewShadingDetail(
+            previewShadingDetail,
+            previewShadingChannels,
+          )
+        : previewShadingDetail,
+    [scene, previewShadingDetail, previewShadingChannels],
+  );
+
+  useEffect(() => {
+    if (!scene || effectivePreviewShadingDetail === previewShadingDetail) return;
+    setPreviewShadingDetail(effectivePreviewShadingDetail);
+  }, [scene, effectivePreviewShadingDetail, previewShadingDetail]);
+
   const showOrientationAxisGuide = activeTextureTab === "orientation";
 
   function handleTextureSettingsResizePointerDown(
@@ -4243,20 +4343,40 @@ export default function App({
                       <option value="flat">{t("flatColour")}</option>
                     </select>
                   </label>
-                  <label title={t("surfaceHighlightsTip")}>
-                    <input
-                      type="checkbox"
-                      checked={surfaceHighlights}
+                  <label title={t("shadingDetailTip")}>
+                    <InfoLabel tip={t("shadingDetailTip")}>
+                      {t("shadingDetail")}
+                    </InfoLabel>
+                    <select
+                      value={effectivePreviewShadingDetail}
                       disabled={
                         !hasAnyPreviewModel || previewDisplayMode === "flat"
                       }
                       onChange={(event) =>
-                        setSurfaceHighlights(event.currentTarget.checked)
+                        setPreviewShadingDetail(
+                          event.currentTarget.value as PreviewShadingDetailMode,
+                        )
                       }
-                    />
-                    <InfoLabel tip={t("surfaceHighlightsTip")}>
-                      {t("surfaceHighlights")}
-                    </InfoLabel>
+                    >
+                      <option value="neutral">{t("shadingNeutral")}</option>
+                      <option value="surface">{t("shadingSurface")}</option>
+                      {previewShadingChannels.metalness && (
+                        <option value="surfaceMetalness">
+                          {t("shadingSurfaceMetalness")}
+                        </option>
+                      )}
+                      {previewShadingChannels.ambientOcclusion && (
+                        <option value="surfaceAo">
+                          {t("shadingSurfaceAo")}
+                        </option>
+                      )}
+                      {previewShadingChannels.metalness &&
+                        previewShadingChannels.ambientOcclusion && (
+                          <option value="surfaceMetalnessAo">
+                            {t("shadingSurfaceMetalnessAo")}
+                          </option>
+                        )}
+                    </select>
                   </label>
                   <label title="Sets the preview background independently from the UI theme.">
                     <InfoLabel tip="Sets the preview background independently from the UI theme.">
@@ -4369,7 +4489,7 @@ export default function App({
                     key={`original-${previewRebuildKey}`}
                     scene={scene}
                     displayMode={previewDisplayMode}
-                    surfaceHighlights={surfaceHighlights}
+                    shadingDetail={effectivePreviewShadingDetail}
                     wireframe={wireframe}
                     showAxes={showAxes || showOrientationAxisGuide}
                     showAxisLabels={showOrientationAxisGuide}
@@ -4392,7 +4512,7 @@ export default function App({
                     key={`baked-${previewRebuildKey}`}
                     scene={bakedScene}
                     displayMode={previewDisplayMode}
-                    surfaceHighlights={surfaceHighlights}
+                    shadingDetail={effectivePreviewShadingDetail}
                     wireframe={wireframe}
                     showAxes={showAxes || showOrientationAxisGuide}
                     showAxisLabels={showOrientationAxisGuide}
